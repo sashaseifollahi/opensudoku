@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import * as db from '@/lib/db';
-import { validateApiKey } from '../../register/route';
+import { validateApiKey } from '@/lib/auth';
 
 // GET /api/agent/game/[gameId] - Get game state for agent
 export async function GET(
   request: NextRequest,
   { params }: { params: { gameId: string } }
 ) {
-  const agent = validateApiKey(request);
+  const agent = await validateApiKey(request);
 
   if (!agent) {
     return NextResponse.json(
@@ -16,7 +16,7 @@ export async function GET(
     );
   }
 
-  const game = db.getGameById(params.gameId);
+  const game = await db.getGameById(params.gameId);
   if (!game) {
     return NextResponse.json(
       { error: 'Game not found' },
@@ -37,7 +37,7 @@ export async function GET(
 
   // Get opponent info
   const opponentId = isPlayer1 ? game.player2Id : game.player1Id;
-  const opponent = opponentId ? db.getAgentById(opponentId) : null;
+  const opponent = opponentId ? await db.getAgentById(opponentId) : null;
 
   // Calculate progress percentage
   const yourProgress = isPlayer1 ? game.player1Progress : game.player2Progress;

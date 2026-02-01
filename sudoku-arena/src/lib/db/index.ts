@@ -1,28 +1,133 @@
-import Database from 'better-sqlite3';
+import { createClient, Client } from '@libsql/client';
 import { randomBytes } from 'crypto';
-import * as fs from 'fs';
 import * as path from 'path';
+import * as fs from 'fs';
 
-// Database path
-const DB_PATH = process.env.DATABASE_PATH || path.join(process.cwd(), 'data', 'sudoku-arena.db');
+// ============================================================================
+// Database Client Setup - Supports both Turso (production) and local SQLite
+// ============================================================================
 
-// Ensure data directory exists
-const dataDir = path.dirname(DB_PATH);
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
+let db: Client;
+
+// Check if we're using Turso (production) or local SQLite (development)
+const isTurso = !!process.env.TURSO_DATABASE_URL;
+
+if (isTurso) {
+  // Turso (production)
+  db = createClient({
+    url: process.env.TURSO_DATABASE_URL!,
+    authToken: process.env.TURSO_AUTH_TOKEN,
+  });
+} else {
+  // Local SQLite for development
+  // Use absolute path and ensure directory exists
+  const dataDir = path.join(process.cwd(), 'data');
+  if (!fs.existsSync(dataDir)) {
+    fs.mkdirSync(dataDir, { recursive: true });
+  }
+  const dbPath = path.join(dataDir, 'sudoku-arena.db');
+  db = createClient({
+    url: `file:${dbPath}`,
+  });
 }
 
-// Initialize database
-const db = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+// Initialize schema
+const schemaSQL = `
+CREATE TABLE IF NOT EXISTS agents (
+  id TEXT PRIMARY KEY,
+  api_key TEXT UNIQUE NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT,
+  games_played INTEGER DEFAULT 0,
+  wins INTEGER DEFAULT 0,
+  losses INTEGER DEFAULT 0,
+  draws INTEGER DEFAULT 0,
+  elo_rating INTEGER DEFAULT 1500,
+  peak_elo INTEGER DEFAULT 1500,
+  total_solve_time_ms INTEGER DEFAULT 0,
+  fastest_solve_ms INTEGER,
+  total_moves INTEGER DEFAULT 0,
+  total_mistakes INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now')),
+  last_active_at TEXT
+);
 
-// Run schema
-const schemaPath = path.join(process.cwd(), 'src', 'lib', 'db', 'schema.sql');
-if (fs.existsSync(schemaPath)) {
-  const schema = fs.readFileSync(schemaPath, 'utf-8');
-  db.exec(schema);
+CREATE TABLE IF NOT EXISTS games (
+  id TEXT PRIMARY KEY,
+  difficulty TEXT NOT NULL,
+  puzzle TEXT NOT NULL,
+  solution TEXT NOT NULL,
+  player1_id TEXT REFERENCES agents(id),
+  player2_id TEXT REFERENCES agents(id),
+  state TEXT DEFAULT 'waiting',
+  player1_progress INTEGER DEFAULT 0,
+  player2_progress INTEGER DEFAULT 0,
+  player1_mistakes INTEGER DEFAULT 0,
+  player2_mistakes INTEGER DEFAULT 0,
+  player1_board TEXT,
+  player2_board TEXT,
+  winner_id TEXT REFERENCES agents(id),
+  player1_time_ms INTEGER,
+  player2_time_ms INTEGER,
+  player1_elo_change INTEGER,
+  player2_elo_change INTEGER,
+  created_at TEXT DEFAULT (datetime('now')),
+  started_at TEXT,
+  finished_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS moves (
+  id TEXT PRIMARY KEY,
+  game_id TEXT NOT NULL REFERENCES games(id),
+  agent_id TEXT NOT NULL REFERENCES agents(id),
+  row INTEGER NOT NULL,
+  col INTEGER NOT NULL,
+  value INTEGER NOT NULL,
+  is_valid INTEGER NOT NULL,
+  timestamp TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS platform_stats (
+  id TEXT PRIMARY KEY DEFAULT 'global',
+  total_agents INTEGER DEFAULT 0,
+  total_games INTEGER DEFAULT 0,
+  active_games INTEGER DEFAULT 0,
+  games_last_24h INTEGER DEFAULT 0,
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+INSERT OR IGNORE INTO platform_stats (id) VALUES ('global');
+
+CREATE INDEX IF NOT EXISTS idx_agents_api_key ON agents(api_key);
+CREATE INDEX IF NOT EXISTS idx_games_state ON games(state);
+CREATE INDEX IF NOT EXISTS idx_games_player1 ON games(player1_id);
+CREATE INDEX IF NOT EXISTS idx_games_player2 ON games(player2_id);
+CREATE INDEX IF NOT EXISTS idx_moves_game ON moves(game_id);
+`;
+
+// Initialize database schema
+let dbInitialized = false;
+async function initDb() {
+  if (dbInitialized) return;
+  try {
+    // Split schema into individual statements and execute
+    const statements = schemaSQL
+      .split(';')
+      .map(s => s.trim())
+      .filter(s => s.length > 0);
+
+    for (const stmt of statements) {
+      await db.execute(stmt);
+    }
+    dbInitialized = true;
+  } catch (error) {
+    console.error('Failed to initialize database:', error);
+  }
 }
+
+// Ensure DB is initialized
+initDb();
 
 // ============================================================================
 // Types
@@ -103,7 +208,7 @@ export interface LeaderboardEntry {
 }
 
 // ============================================================================
-// Agent Operations
+// Helper Functions
 // ============================================================================
 
 function generateApiKey(): string {
@@ -114,87 +219,97 @@ function generateId(): string {
   return randomBytes(12).toString('hex');
 }
 
-export function createAgent(name: string, description?: string): Agent {
+function mapRowToAgent(row: Record<string, unknown>): Agent {
+  return {
+    id: row.id as string,
+    apiKey: row.api_key as string,
+    name: row.name as string,
+    description: row.description as string | null,
+    gamesPlayed: row.games_played as number,
+    wins: row.wins as number,
+    losses: row.losses as number,
+    draws: row.draws as number,
+    eloRating: row.elo_rating as number,
+    peakElo: row.peak_elo as number,
+    totalSolveTimeMs: row.total_solve_time_ms as number,
+    fastestSolveMs: row.fastest_solve_ms as number | null,
+    totalMoves: row.total_moves as number,
+    totalMistakes: row.total_mistakes as number,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+    lastActiveAt: row.last_active_at as string | null,
+  };
+}
+
+function mapRowToGame(row: Record<string, unknown>): Game {
+  return {
+    id: row.id as string,
+    difficulty: row.difficulty as string,
+    puzzle: row.puzzle as string,
+    solution: row.solution as string,
+    player1Id: row.player1_id as string | null,
+    player2Id: row.player2_id as string | null,
+    state: row.state as Game['state'],
+    player1Progress: row.player1_progress as number,
+    player2Progress: row.player2_progress as number,
+    player1Mistakes: row.player1_mistakes as number,
+    player2Mistakes: row.player2_mistakes as number,
+    player1Board: row.player1_board as string | null,
+    player2Board: row.player2_board as string | null,
+    winnerId: row.winner_id as string | null,
+    player1TimeMs: row.player1_time_ms as number | null,
+    player2TimeMs: row.player2_time_ms as number | null,
+    player1EloChange: row.player1_elo_change as number | null,
+    player2EloChange: row.player2_elo_change as number | null,
+    createdAt: row.created_at as string,
+    startedAt: row.started_at as string | null,
+    finishedAt: row.finished_at as string | null,
+  };
+}
+
+// ============================================================================
+// Agent Operations
+// ============================================================================
+
+export async function createAgent(name: string, description?: string): Promise<Agent> {
+  await initDb();
   const id = generateId();
   const apiKey = generateApiKey();
 
-  const stmt = db.prepare(`
-    INSERT INTO agents (id, api_key, name, description)
-    VALUES (?, ?, ?, ?)
-  `);
-
-  stmt.run(id, apiKey, name, description || null);
+  await db.execute({
+    sql: `INSERT INTO agents (id, api_key, name, description) VALUES (?, ?, ?, ?)`,
+    args: [id, apiKey, name, description || null],
+  });
 
   // Update platform stats
-  db.prepare(`UPDATE platform_stats SET total_agents = total_agents + 1 WHERE id = 'global'`).run();
+  await db.execute(`UPDATE platform_stats SET total_agents = total_agents + 1 WHERE id = 'global'`);
 
-  return getAgentById(id)!;
+  return (await getAgentById(id))!;
 }
 
-export function getAgentById(id: string): Agent | null {
-  const row = db.prepare(`SELECT * FROM agents WHERE id = ?`).get(id) as any;
-  return row ? mapRowToAgent(row) : null;
+export async function getAgentById(id: string): Promise<Agent | null> {
+  await initDb();
+  const result = await db.execute({
+    sql: `SELECT * FROM agents WHERE id = ?`,
+    args: [id],
+  });
+
+  if (result.rows.length === 0) return null;
+  return mapRowToAgent(result.rows[0] as Record<string, unknown>);
 }
 
-export function getAgentByApiKey(apiKey: string): Agent | null {
-  const row = db.prepare(`SELECT * FROM agents WHERE api_key = ?`).get(apiKey) as any;
-  return row ? mapRowToAgent(row) : null;
+export async function getAgentByApiKey(apiKey: string): Promise<Agent | null> {
+  await initDb();
+  const result = await db.execute({
+    sql: `SELECT * FROM agents WHERE api_key = ?`,
+    args: [apiKey],
+  });
+
+  if (result.rows.length === 0) return null;
+  return mapRowToAgent(result.rows[0] as Record<string, unknown>);
 }
 
-export function updateAgentStats(
-  id: string,
-  updates: {
-    gamesPlayed?: number;
-    wins?: number;
-    losses?: number;
-    eloRating?: number;
-    totalSolveTimeMs?: number;
-    fastestSolveMs?: number;
-    totalMoves?: number;
-    totalMistakes?: number;
-  }
-): void {
-  const agent = getAgentById(id);
-  if (!agent) return;
-
-  const newElo = updates.eloRating ?? agent.eloRating;
-  const newPeakElo = Math.max(agent.peakElo, newElo);
-
-  db.prepare(`
-    UPDATE agents SET
-      games_played = COALESCE(?, games_played),
-      wins = COALESCE(?, wins),
-      losses = COALESCE(?, losses),
-      elo_rating = COALESCE(?, elo_rating),
-      peak_elo = ?,
-      total_solve_time_ms = COALESCE(?, total_solve_time_ms),
-      fastest_solve_ms = CASE
-        WHEN ? IS NOT NULL AND (fastest_solve_ms IS NULL OR ? < fastest_solve_ms)
-        THEN ?
-        ELSE fastest_solve_ms
-      END,
-      total_moves = COALESCE(?, total_moves),
-      total_mistakes = COALESCE(?, total_mistakes),
-      updated_at = datetime('now'),
-      last_active_at = datetime('now')
-    WHERE id = ?
-  `).run(
-    updates.gamesPlayed ?? null,
-    updates.wins ?? null,
-    updates.losses ?? null,
-    updates.eloRating ?? null,
-    newPeakElo,
-    updates.totalSolveTimeMs ?? null,
-    updates.fastestSolveMs ?? null,
-    updates.fastestSolveMs ?? null,
-    updates.fastestSolveMs ?? null,
-    updates.totalMoves ?? null,
-    updates.totalMistakes ?? null,
-    id
-  );
-}
-
-export function incrementAgentStats(
+export async function incrementAgentStats(
   id: string,
   increments: {
     gamesPlayed?: number;
@@ -205,8 +320,9 @@ export function incrementAgentStats(
     moves?: number;
     mistakes?: number;
   }
-): void {
-  const agent = getAgentById(id);
+): Promise<void> {
+  await initDb();
+  const agent = await getAgentById(id);
   if (!agent) return;
 
   const newElo = agent.eloRating + (increments.eloChange ?? 0);
@@ -215,237 +331,217 @@ export function incrementAgentStats(
     ? increments.solveTimeMs
     : agent.fastestSolveMs;
 
-  db.prepare(`
-    UPDATE agents SET
-      games_played = games_played + ?,
-      wins = wins + ?,
-      losses = losses + ?,
-      elo_rating = ?,
-      peak_elo = ?,
-      total_solve_time_ms = total_solve_time_ms + ?,
-      fastest_solve_ms = ?,
-      total_moves = total_moves + ?,
-      total_mistakes = total_mistakes + ?,
-      updated_at = datetime('now'),
-      last_active_at = datetime('now')
-    WHERE id = ?
-  `).run(
-    increments.gamesPlayed ?? 0,
-    increments.wins ?? 0,
-    increments.losses ?? 0,
-    newElo,
-    newPeakElo,
-    increments.solveTimeMs ?? 0,
-    newFastest,
-    increments.moves ?? 0,
-    increments.mistakes ?? 0,
-    id
-  );
-}
-
-function mapRowToAgent(row: any): Agent {
-  return {
-    id: row.id,
-    apiKey: row.api_key,
-    name: row.name,
-    description: row.description,
-    gamesPlayed: row.games_played,
-    wins: row.wins,
-    losses: row.losses,
-    draws: row.draws,
-    eloRating: row.elo_rating,
-    peakElo: row.peak_elo,
-    totalSolveTimeMs: row.total_solve_time_ms,
-    fastestSolveMs: row.fastest_solve_ms,
-    totalMoves: row.total_moves,
-    totalMistakes: row.total_mistakes,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    lastActiveAt: row.last_active_at,
-  };
+  await db.execute({
+    sql: `
+      UPDATE agents SET
+        games_played = games_played + ?,
+        wins = wins + ?,
+        losses = losses + ?,
+        elo_rating = ?,
+        peak_elo = ?,
+        total_solve_time_ms = total_solve_time_ms + ?,
+        fastest_solve_ms = ?,
+        total_moves = total_moves + ?,
+        total_mistakes = total_mistakes + ?,
+        updated_at = datetime('now'),
+        last_active_at = datetime('now')
+      WHERE id = ?
+    `,
+    args: [
+      increments.gamesPlayed ?? 0,
+      increments.wins ?? 0,
+      increments.losses ?? 0,
+      newElo,
+      newPeakElo,
+      increments.solveTimeMs ?? 0,
+      newFastest,
+      increments.moves ?? 0,
+      increments.mistakes ?? 0,
+      id,
+    ],
+  });
 }
 
 // ============================================================================
 // Game Operations
 // ============================================================================
 
-export function createGame(difficulty: string, puzzle: string, solution: string, player1Id?: string): Game {
+export async function createGame(difficulty: string, puzzle: string, solution: string, player1Id?: string): Promise<Game> {
+  await initDb();
   const id = generateId();
 
-  db.prepare(`
-    INSERT INTO games (id, difficulty, puzzle, solution, player1_id, player1_board)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(id, difficulty, puzzle, solution, player1Id || null, puzzle);
+  await db.execute({
+    sql: `INSERT INTO games (id, difficulty, puzzle, solution, player1_id, player1_board) VALUES (?, ?, ?, ?, ?, ?)`,
+    args: [id, difficulty, puzzle, solution, player1Id || null, puzzle],
+  });
 
-  return getGameById(id)!;
+  return (await getGameById(id))!;
 }
 
-export function getGameById(id: string): Game | null {
-  const row = db.prepare(`SELECT * FROM games WHERE id = ?`).get(id) as any;
-  return row ? mapRowToGame(row) : null;
+export async function getGameById(id: string): Promise<Game | null> {
+  await initDb();
+  const result = await db.execute({
+    sql: `SELECT * FROM games WHERE id = ?`,
+    args: [id],
+  });
+
+  if (result.rows.length === 0) return null;
+  return mapRowToGame(result.rows[0] as Record<string, unknown>);
 }
 
-export function getWaitingGames(difficulty?: string): Game[] {
-  let query = `SELECT * FROM games WHERE state = 'waiting'`;
-  const params: any[] = [];
+export async function getWaitingGames(difficulty?: string): Promise<Game[]> {
+  await initDb();
+  let sql = `SELECT * FROM games WHERE state = 'waiting'`;
+  const args: (string | number)[] = [];
 
   if (difficulty) {
-    query += ` AND difficulty = ?`;
-    params.push(difficulty);
+    sql += ` AND difficulty = ?`;
+    args.push(difficulty);
   }
 
-  query += ` ORDER BY created_at ASC LIMIT 20`;
+  sql += ` ORDER BY created_at ASC LIMIT 20`;
 
-  const rows = db.prepare(query).all(...params) as any[];
-  return rows.map(mapRowToGame);
+  const result = await db.execute({ sql, args });
+  return result.rows.map(row => mapRowToGame(row as Record<string, unknown>));
 }
 
-export function getActiveGames(): Game[] {
-  const rows = db.prepare(`
+export async function getActiveGames(): Promise<Game[]> {
+  await initDb();
+  const result = await db.execute(`
     SELECT * FROM games
     WHERE state IN ('countdown', 'playing')
     ORDER BY created_at DESC
     LIMIT 50
-  `).all() as any[];
-  return rows.map(mapRowToGame);
+  `);
+  return result.rows.map(row => mapRowToGame(row as Record<string, unknown>));
 }
 
-export function getRecentGames(limit: number = 20): Game[] {
-  const rows = db.prepare(`
-    SELECT * FROM games
-    ORDER BY created_at DESC
-    LIMIT ?
-  `).all(limit) as any[];
-  return rows.map(mapRowToGame);
+export async function getRecentGames(limit: number = 20): Promise<Game[]> {
+  await initDb();
+  const result = await db.execute({
+    sql: `SELECT * FROM games ORDER BY created_at DESC LIMIT ?`,
+    args: [limit],
+  });
+  return result.rows.map(row => mapRowToGame(row as Record<string, unknown>));
 }
 
-export function joinGame(gameId: string, playerId: string): Game | null {
-  const game = getGameById(gameId);
+export async function joinGame(gameId: string, playerId: string): Promise<Game | null> {
+  await initDb();
+  const game = await getGameById(gameId);
   if (!game || game.state !== 'waiting') return null;
   if (game.player1Id === playerId) return null; // Can't join own game
 
-  db.prepare(`
-    UPDATE games SET
-      player2_id = ?,
-      player2_board = puzzle,
-      state = 'countdown',
-      started_at = datetime('now')
-    WHERE id = ? AND state = 'waiting'
-  `).run(playerId, gameId);
+  await db.execute({
+    sql: `
+      UPDATE games SET
+        player2_id = ?,
+        player2_board = puzzle,
+        state = 'countdown',
+        started_at = datetime('now')
+      WHERE id = ? AND state = 'waiting'
+    `,
+    args: [playerId, gameId],
+  });
 
   return getGameById(gameId);
 }
 
-export function updateGameState(gameId: string, state: Game['state']): void {
-  db.prepare(`UPDATE games SET state = ? WHERE id = ?`).run(state, gameId);
+export async function updateGameState(gameId: string, state: Game['state']): Promise<void> {
+  await initDb();
+  await db.execute({
+    sql: `UPDATE games SET state = ? WHERE id = ?`,
+    args: [state, gameId],
+  });
 }
 
-export function updatePlayerProgress(
+export async function updatePlayerProgress(
   gameId: string,
   playerId: string,
   progress: number,
   mistakes: number,
   board: string
-): void {
-  const game = getGameById(gameId);
+): Promise<void> {
+  await initDb();
+  const game = await getGameById(gameId);
   if (!game) return;
 
   if (game.player1Id === playerId) {
-    db.prepare(`
-      UPDATE games SET player1_progress = ?, player1_mistakes = ?, player1_board = ?
-      WHERE id = ?
-    `).run(progress, mistakes, board, gameId);
+    await db.execute({
+      sql: `UPDATE games SET player1_progress = ?, player1_mistakes = ?, player1_board = ? WHERE id = ?`,
+      args: [progress, mistakes, board, gameId],
+    });
   } else if (game.player2Id === playerId) {
-    db.prepare(`
-      UPDATE games SET player2_progress = ?, player2_mistakes = ?, player2_board = ?
-      WHERE id = ?
-    `).run(progress, mistakes, board, gameId);
+    await db.execute({
+      sql: `UPDATE games SET player2_progress = ?, player2_mistakes = ?, player2_board = ? WHERE id = ?`,
+      args: [progress, mistakes, board, gameId],
+    });
   }
 }
 
-export function finishGame(
+export async function finishGame(
   gameId: string,
   winnerId: string | null,
   player1TimeMs: number,
   player2TimeMs: number,
   player1EloChange: number,
   player2EloChange: number
-): void {
-  db.prepare(`
-    UPDATE games SET
-      state = 'finished',
-      winner_id = ?,
-      player1_time_ms = ?,
-      player2_time_ms = ?,
-      player1_elo_change = ?,
-      player2_elo_change = ?,
-      finished_at = datetime('now')
-    WHERE id = ?
-  `).run(winnerId, player1TimeMs, player2TimeMs, player1EloChange, player2EloChange, gameId);
+): Promise<void> {
+  await initDb();
+  await db.execute({
+    sql: `
+      UPDATE games SET
+        state = 'finished',
+        winner_id = ?,
+        player1_time_ms = ?,
+        player2_time_ms = ?,
+        player1_elo_change = ?,
+        player2_elo_change = ?,
+        finished_at = datetime('now')
+      WHERE id = ?
+    `,
+    args: [winnerId, player1TimeMs, player2TimeMs, player1EloChange, player2EloChange, gameId],
+  });
 
   // Update platform stats
-  db.prepare(`UPDATE platform_stats SET total_games = total_games + 1 WHERE id = 'global'`).run();
-}
-
-function mapRowToGame(row: any): Game {
-  return {
-    id: row.id,
-    difficulty: row.difficulty,
-    puzzle: row.puzzle,
-    solution: row.solution,
-    player1Id: row.player1_id,
-    player2Id: row.player2_id,
-    state: row.state,
-    player1Progress: row.player1_progress,
-    player2Progress: row.player2_progress,
-    player1Mistakes: row.player1_mistakes,
-    player2Mistakes: row.player2_mistakes,
-    player1Board: row.player1_board,
-    player2Board: row.player2_board,
-    winnerId: row.winner_id,
-    player1TimeMs: row.player1_time_ms,
-    player2TimeMs: row.player2_time_ms,
-    player1EloChange: row.player1_elo_change,
-    player2EloChange: row.player2_elo_change,
-    createdAt: row.created_at,
-    startedAt: row.started_at,
-    finishedAt: row.finished_at,
-  };
+  await db.execute(`UPDATE platform_stats SET total_games = total_games + 1 WHERE id = 'global'`);
 }
 
 // ============================================================================
 // Move Operations
 // ============================================================================
 
-export function recordMove(
+export async function recordMove(
   gameId: string,
   agentId: string,
   row: number,
   col: number,
   value: number,
   isValid: boolean
-): void {
+): Promise<void> {
+  await initDb();
   const id = generateId();
-  db.prepare(`
-    INSERT INTO moves (id, game_id, agent_id, row, col, value, is_valid)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(id, gameId, agentId, row, col, value, isValid ? 1 : 0);
+  await db.execute({
+    sql: `INSERT INTO moves (id, game_id, agent_id, row, col, value, is_valid) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    args: [id, gameId, agentId, row, col, value, isValid ? 1 : 0],
+  });
 }
 
-export function getGameMoves(gameId: string): Move[] {
-  const rows = db.prepare(`
-    SELECT * FROM moves WHERE game_id = ? ORDER BY timestamp ASC
-  `).all(gameId) as any[];
+export async function getGameMoves(gameId: string): Promise<Move[]> {
+  await initDb();
+  const result = await db.execute({
+    sql: `SELECT * FROM moves WHERE game_id = ? ORDER BY timestamp ASC`,
+    args: [gameId],
+  });
 
-  return rows.map(row => ({
-    id: row.id,
-    gameId: row.game_id,
-    agentId: row.agent_id,
-    row: row.row,
-    col: row.col,
-    value: row.value,
-    isValid: row.is_valid === 1,
-    timestamp: row.timestamp,
+  return result.rows.map(row => ({
+    id: row.id as string,
+    gameId: row.game_id as string,
+    agentId: row.agent_id as string,
+    row: row.row as number,
+    col: row.col as number,
+    value: row.value as number,
+    isValid: (row.is_valid as number) === 1,
+    timestamp: row.timestamp as string,
   }));
 }
 
@@ -453,30 +549,32 @@ export function getGameMoves(gameId: string): Move[] {
 // Leaderboard Operations
 // ============================================================================
 
-export function getLeaderboard(limit: number = 50, difficulty?: string): LeaderboardEntry[] {
-  // For now, we'll get all agents sorted by ELO
-  // In future, we could filter by difficulty-specific stats
-  const rows = db.prepare(`
-    SELECT
-      id, name, elo_rating, games_played, wins, losses,
-      CASE WHEN games_played > 0 THEN CAST(wins AS FLOAT) / games_played * 100 ELSE 0 END as win_rate,
-      CASE WHEN games_played > 0 THEN total_solve_time_ms / games_played ELSE NULL END as avg_solve_ms
-    FROM agents
-    WHERE games_played > 0
-    ORDER BY elo_rating DESC
-    LIMIT ?
-  `).all(limit) as any[];
+export async function getLeaderboard(limit: number = 50, difficulty?: string): Promise<LeaderboardEntry[]> {
+  await initDb();
+  const result = await db.execute({
+    sql: `
+      SELECT
+        id, name, elo_rating, games_played, wins, losses,
+        CASE WHEN games_played > 0 THEN CAST(wins AS FLOAT) / games_played * 100 ELSE 0 END as win_rate,
+        CASE WHEN games_played > 0 THEN total_solve_time_ms / games_played ELSE NULL END as avg_solve_ms
+      FROM agents
+      WHERE games_played > 0
+      ORDER BY elo_rating DESC
+      LIMIT ?
+    `,
+    args: [limit],
+  });
 
-  return rows.map((row, index) => ({
+  return result.rows.map((row, index) => ({
     rank: index + 1,
-    id: row.id,
-    name: row.name,
-    eloRating: row.elo_rating,
-    gamesPlayed: row.games_played,
-    wins: row.wins,
-    losses: row.losses,
-    winRate: Math.round(row.win_rate * 10) / 10,
-    avgSolveMs: row.avg_solve_ms ? Math.round(row.avg_solve_ms) : null,
+    id: row.id as string,
+    name: row.name as string,
+    eloRating: row.elo_rating as number,
+    gamesPlayed: row.games_played as number,
+    wins: row.wins as number,
+    losses: row.losses as number,
+    winRate: Math.round((row.win_rate as number) * 10) / 10,
+    avgSolveMs: row.avg_solve_ms ? Math.round(row.avg_solve_ms as number) : null,
   }));
 }
 
@@ -484,32 +582,40 @@ export function getLeaderboard(limit: number = 50, difficulty?: string): Leaderb
 // Platform Stats
 // ============================================================================
 
-export function getPlatformStats(): PlatformStats {
+export async function getPlatformStats(): Promise<PlatformStats> {
+  await initDb();
+
   // Update active games count
-  const activeCount = db.prepare(`
+  const activeResult = await db.execute(`
     SELECT COUNT(*) as count FROM games WHERE state IN ('waiting', 'countdown', 'playing')
-  `).get() as any;
+  `);
+  const activeCount = (activeResult.rows[0]?.count as number) || 0;
 
   // Count games in last 24 hours
-  const last24h = db.prepare(`
+  const last24hResult = await db.execute(`
     SELECT COUNT(*) as count FROM games WHERE created_at > datetime('now', '-24 hours')
-  `).get() as any;
+  `);
+  const last24hCount = (last24hResult.rows[0]?.count as number) || 0;
 
-  db.prepare(`
-    UPDATE platform_stats SET
-      active_games = ?,
-      games_last_24h = ?,
-      updated_at = datetime('now')
-    WHERE id = 'global'
-  `).run(activeCount.count, last24h.count);
+  await db.execute({
+    sql: `
+      UPDATE platform_stats SET
+        active_games = ?,
+        games_last_24h = ?,
+        updated_at = datetime('now')
+      WHERE id = 'global'
+    `,
+    args: [activeCount, last24hCount],
+  });
 
-  const row = db.prepare(`SELECT * FROM platform_stats WHERE id = 'global'`).get() as any;
+  const result = await db.execute(`SELECT * FROM platform_stats WHERE id = 'global'`);
+  const row = result.rows[0];
 
   return {
-    totalAgents: row.total_agents,
-    totalGames: row.total_games,
-    activeGames: row.active_games,
-    gamesLast24h: row.games_last_24h,
+    totalAgents: (row?.total_agents as number) || 0,
+    totalGames: (row?.total_games as number) || 0,
+    activeGames: (row?.active_games as number) || 0,
+    gamesLast24h: (row?.games_last_24h as number) || 0,
   };
 }
 
@@ -536,15 +642,19 @@ export function calculateEloChange(
 // Cleanup
 // ============================================================================
 
-export function cleanupOldGames(maxAgeMinutes: number = 60): number {
-  const result = db.prepare(`
-    DELETE FROM games
-    WHERE state = 'waiting'
-    AND created_at < datetime('now', '-' || ? || ' minutes')
-  `).run(maxAgeMinutes);
+export async function cleanupOldGames(maxAgeMinutes: number = 60): Promise<number> {
+  await initDb();
+  const result = await db.execute({
+    sql: `
+      DELETE FROM games
+      WHERE state = 'waiting'
+      AND created_at < datetime('now', '-' || ? || ' minutes')
+    `,
+    args: [maxAgeMinutes],
+  });
 
-  return result.changes;
+  return result.rowsAffected;
 }
 
-// Export the database instance for direct queries if needed
+// Export the database client for direct queries if needed
 export { db };

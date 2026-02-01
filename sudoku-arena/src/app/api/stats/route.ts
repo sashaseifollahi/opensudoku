@@ -4,7 +4,7 @@ import * as db from '@/lib/db';
 // GET /api/stats - Get platform statistics
 export async function GET() {
   try {
-    const stats = db.getPlatformStats();
+    const stats = await db.getPlatformStats();
 
     return NextResponse.json({
       activeAgents: stats.totalAgents,

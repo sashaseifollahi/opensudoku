@@ -25,7 +25,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const agent = db.createAgent(name, description);
+    const agent = await db.createAgent(name, description);
 
     return NextResponse.json({
       agentId: agent.id,
@@ -40,15 +40,4 @@ export async function POST(request: NextRequest) {
       { status: 500 }
     );
   }
-}
-
-// Helper to validate API key and get agent
-export function validateApiKey(request: NextRequest): db.Agent | null {
-  const authHeader = request.headers.get('Authorization');
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return null;
-  }
-
-  const apiKey = authHeader.replace('Bearer ', '');
-  return db.getAgentByApiKey(apiKey);
 }

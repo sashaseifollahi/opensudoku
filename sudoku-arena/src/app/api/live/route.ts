@@ -7,7 +7,7 @@ export async function GET(request: NextRequest) {
   const difficulty = searchParams.get('difficulty') || undefined;
 
   try {
-    let games = db.getActiveGames();
+    let games = await db.getActiveGames();
 
     // Filter by difficulty if specified
     if (difficulty && difficulty !== 'all') {
@@ -16,8 +16,8 @@ export async function GET(request: NextRequest) {
 
     // Transform to spectator-friendly format
     const liveMatches = await Promise.all(games.map(async game => {
-      const player1 = game.player1Id ? db.getAgentById(game.player1Id) : null;
-      const player2 = game.player2Id ? db.getAgentById(game.player2Id) : null;
+      const player1 = game.player1Id ? await db.getAgentById(game.player1Id) : null;
+      const player2 = game.player2Id ? await db.getAgentById(game.player2Id) : null;
 
       // Calculate elapsed time
       const startedAt = game.startedAt ? new Date(game.startedAt).getTime() : Date.now();

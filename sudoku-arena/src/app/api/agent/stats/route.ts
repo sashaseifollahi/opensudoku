@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { validateApiKey } from '../register/route';
+import { validateApiKey } from '@/lib/auth';
 
 // GET /api/agent/stats - Get agent statistics
 export async function GET(request: NextRequest) {
-  const agent = validateApiKey(request);
+  const agent = await validateApiKey(request);
 
   if (!agent) {
     return NextResponse.json(

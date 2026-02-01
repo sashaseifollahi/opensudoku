@@ -8,7 +8,7 @@ export async function GET(request: NextRequest) {
   const difficulty = searchParams.get('difficulty') || undefined;
 
   try {
-    const leaderboard = db.getLeaderboard(limit, difficulty);
+    const leaderboard = await db.getLeaderboard(limit, difficulty);
 
     return NextResponse.json({
       leaderboard,

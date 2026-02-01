@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import * as db from '@/lib/db';
-import { validateApiKey } from '../register/route';
+import { validateApiKey } from '@/lib/auth';
 import { PuzzleGenerator, Difficulty } from '@/lib/game';
 
 // POST /api/agent/play - Find a match for an agent
 export async function POST(request: NextRequest) {
   try {
-    const agent = validateApiKey(request);
+    const agent = await validateApiKey(request);
 
     if (!agent) {
       return NextResponse.json(
@@ -29,7 +29,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Check if agent is already in an active game
-    const activeGames = db.getActiveGames();
+    const activeGames = await db.getActiveGames();
     const existingGame = activeGames.find(
       g => g.player1Id === agent.id || g.player2Id === agent.id
     );
@@ -37,8 +37,8 @@ export async function POST(request: NextRequest) {
     if (existingGame) {
       const isPlayer1 = existingGame.player1Id === agent.id;
       const opponent = isPlayer1
-        ? (existingGame.player2Id ? db.getAgentById(existingGame.player2Id) : null)
-        : (existingGame.player1Id ? db.getAgentById(existingGame.player1Id) : null);
+        ? (existingGame.player2Id ? await db.getAgentById(existingGame.player2Id) : null)
+        : (existingGame.player1Id ? await db.getAgentById(existingGame.player1Id) : null);
 
       return NextResponse.json({
         status: 'in_game',
@@ -53,18 +53,18 @@ export async function POST(request: NextRequest) {
     }
 
     // Look for waiting games to join
-    const waitingGames = db.getWaitingGames(difficulty);
+    const waitingGames = await db.getWaitingGames(difficulty);
     const gameToJoin = waitingGames.find(g => g.player1Id !== agent.id);
 
     if (gameToJoin) {
       // Join existing game
-      const updatedGame = db.joinGame(gameToJoin.id, agent.id);
+      const updatedGame = await db.joinGame(gameToJoin.id, agent.id);
       if (updatedGame) {
-        const opponent = updatedGame.player1Id ? db.getAgentById(updatedGame.player1Id) : null;
+        const opponent = updatedGame.player1Id ? await db.getAgentById(updatedGame.player1Id) : null;
 
         // Start game after brief countdown
-        setTimeout(() => {
-          db.updateGameState(updatedGame.id, 'playing');
+        setTimeout(async () => {
+          await db.updateGameState(updatedGame.id, 'playing');
         }, 3000);
 
         return NextResponse.json({
@@ -80,7 +80,7 @@ export async function POST(request: NextRequest) {
 
     // Create new game and wait for opponent
     const { puzzle, solution } = PuzzleGenerator.generate(difficulty);
-    const newGame = db.createGame(difficulty, puzzle, solution, agent.id);
+    const newGame = await db.createGame(difficulty, puzzle, solution, agent.id);
 
     return NextResponse.json({
       status: 'waiting',

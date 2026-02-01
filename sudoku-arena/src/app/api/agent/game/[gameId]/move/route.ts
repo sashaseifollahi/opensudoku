@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import * as db from '@/lib/db';
-import { validateApiKey } from '../../../register/route';
+import { validateApiKey } from '@/lib/auth';
 
 // POST /api/agent/game/[gameId]/move - Make a move
 export async function POST(
@@ -8,7 +8,7 @@ export async function POST(
   { params }: { params: { gameId: string } }
 ) {
   try {
-    const agent = validateApiKey(request);
+    const agent = await validateApiKey(request);
 
     if (!agent) {
       return NextResponse.json(
@@ -17,7 +17,7 @@ export async function POST(
       );
     }
 
-    const game = db.getGameById(params.gameId);
+    const game = await db.getGameById(params.gameId);
     if (!game) {
       return NextResponse.json(
         { error: 'Game not found' },
@@ -120,10 +120,10 @@ export async function POST(
     }
 
     // Record the move
-    db.recordMove(game.id, agent.id, row, col, value, isCorrect);
+    await db.recordMove(game.id, agent.id, row, col, value, isCorrect);
 
     // Update player progress in database
-    db.updatePlayerProgress(game.id, agent.id, progress, mistakes, newBoard);
+    await db.updatePlayerProgress(game.id, agent.id, progress, mistakes, newBoard);
 
     // Check if game is complete (all 81 cells correct)
     const isComplete = progress === 81;
@@ -137,7 +137,7 @@ export async function POST(
 
       // Get opponent info for ELO calculation
       const opponentId = isPlayer1 ? game.player2Id : game.player1Id;
-      const opponent = opponentId ? db.getAgentById(opponentId) : null;
+      const opponent = opponentId ? await db.getAgentById(opponentId) : null;
 
       // Calculate ELO changes
       let winnerEloChange = 0;
@@ -154,7 +154,7 @@ export async function POST(
       const player1EloChange = isPlayer1 ? winnerEloChange : loserEloChange;
       const player2EloChange = isPlayer2 ? winnerEloChange : loserEloChange;
 
-      db.finishGame(
+      await db.finishGame(
         game.id,
         agent.id,
         player1Time,
@@ -164,7 +164,7 @@ export async function POST(
       );
 
       // Update winner stats
-      db.incrementAgentStats(agent.id, {
+      await db.incrementAgentStats(agent.id, {
         gamesPlayed: 1,
         wins: 1,
         eloChange: winnerEloChange,
@@ -175,7 +175,7 @@ export async function POST(
 
       // Update loser stats
       if (opponent) {
-        db.incrementAgentStats(opponent.id, {
+        await db.incrementAgentStats(opponent.id, {
           gamesPlayed: 1,
           losses: 1,
           eloChange: loserEloChange,
@@ -191,11 +191,11 @@ export async function POST(
       };
     } else {
       // Just update move count
-      db.incrementAgentStats(agent.id, { moves: 1 });
+      await db.incrementAgentStats(agent.id, { moves: 1 });
     }
 
     // Get opponent progress for response
-    const updatedGame = db.getGameById(game.id);
+    const updatedGame = await db.getGameById(game.id);
     const opponentProgress = updatedGame
       ? (isPlayer1 ? updatedGame.player2Progress : updatedGame.player1Progress)
       : 0;
