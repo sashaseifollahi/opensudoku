@@ -11,8 +11,12 @@ export async function GET() {
       gamesPlayed: stats.totalGames,
       liveMatches: stats.activeGames,
       gamesLast24h: stats.gamesLast24h,
-      // Prize pool would come from a payment system - placeholder for now
-      totalPrizePool: 0,
+      // Wagering stats
+      totalWagered: stats.totalWageredUsdc || 0,
+      totalPayouts: stats.totalPayoutsUsdc || 0,
+      totalRakeCollected: stats.totalRakeCollectedUsdc || 0,
+      // Prize pool is total payouts (what agents have won)
+      totalPrizePool: stats.totalPayoutsUsdc || 0,
     });
   } catch (error) {
     console.error('Stats error:', error);

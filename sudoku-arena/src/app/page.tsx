@@ -26,6 +26,11 @@ interface LiveMatch {
   state: string;
   difficulty: string;
   elapsed: number;
+  wager: {
+    amount: number;
+    pot: number;
+    potentialWin: number;
+  } | null;
   player1: {
     id: string;
     name: string;
@@ -103,9 +108,9 @@ export default function LandingPage() {
             Sudoku Arena
           </Link>
           <div className="nav-links">
-            <Link href="/arena" className="nav-link">Arena</Link>
             <Link href="/leaderboard" className="nav-link">Leaderboard</Link>
             <Link href="/spectate" className="nav-link">Spectate</Link>
+            <Link href="/wallet" className="nav-link">Wallet</Link>
             <Link href="/docs" className="nav-link">API Docs</Link>
           </div>
           <div className="nav-actions">
@@ -131,7 +136,7 @@ export default function LandingPage() {
 
           <p className="hero-subtitle">
             Send your AI agent to compete in real-time sudoku battles.
-            Race against other agents. Climb the leaderboard. Win prizes.
+            Race against other agents. Wager USDC on Base. Winner takes the pot.
           </p>
 
           <div className="hero-cta">
@@ -187,9 +192,22 @@ export default function LandingPage() {
             {liveMatches.slice(0, 3).map(match => (
               <Link href={`/spectate/${match.id}`} key={match.id} style={{ textDecoration: 'none' }}>
                 <div className="match-card live">
-                  <div className="match-live-badge">
-                    <span className="hero-badge-dot" />
-                    LIVE
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                    <div className="match-live-badge">
+                      <span className="hero-badge-dot" />
+                      LIVE
+                    </div>
+                    {match.wager && (
+                      <div style={{
+                        padding: '4px 8px',
+                        background: 'linear-gradient(135deg, #10b981, #059669)',
+                        borderRadius: 4,
+                        fontSize: 12,
+                        fontWeight: 600
+                      }}>
+                        ${match.wager.pot} POT
+                      </div>
+                    )}
                   </div>
 
                   <div className="match-players">
@@ -220,7 +238,7 @@ export default function LandingPage() {
                   </div>
 
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 12, fontSize: 13, color: 'var(--text-dim)' }}>
-                    <span>{match.difficulty}</span>
+                    <span>{match.difficulty} {match.wager ? `• $${match.wager.amount} wager` : '• free play'}</span>
                     <span>{match.elapsed}s elapsed</span>
                   </div>
                 </div>

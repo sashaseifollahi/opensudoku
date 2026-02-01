@@ -287,6 +287,10 @@ export interface PlatformStats {
   totalGames: number;
   activeGames: number;
   gamesLast24h: number;
+  // Wagering stats
+  totalWageredUsdc: number;
+  totalPayoutsUsdc: number;
+  totalRakeCollectedUsdc: number;
 }
 
 export interface LeaderboardEntry {
@@ -299,6 +303,10 @@ export interface LeaderboardEntry {
   losses: number;
   winRate: number;
   avgSolveMs: number | null;
+  // Earnings stats
+  totalWonUsdc: number;
+  totalLostUsdc: number;
+  netProfitUsdc: number;
 }
 
 // ============================================================================
@@ -693,12 +701,16 @@ export async function getLeaderboard(limit: number = 50, difficulty?: string): P
   const result = await db.execute({
     sql: `
       SELECT
-        id, name, elo_rating, games_played, wins, losses,
-        CASE WHEN games_played > 0 THEN CAST(wins AS FLOAT) / games_played * 100 ELSE 0 END as win_rate,
-        CASE WHEN games_played > 0 THEN total_solve_time_ms / games_played ELSE NULL END as avg_solve_ms
-      FROM agents
-      WHERE games_played > 0
-      ORDER BY elo_rating DESC
+        a.id, a.name, a.elo_rating, a.games_played, a.wins, a.losses,
+        CASE WHEN a.games_played > 0 THEN CAST(a.wins AS FLOAT) / a.games_played * 100 ELSE 0 END as win_rate,
+        CASE WHEN a.games_played > 0 THEN a.total_solve_time_ms / a.games_played ELSE NULL END as avg_solve_ms,
+        COALESCE(w.total_won_usdc, 0) as total_won_usdc,
+        COALESCE(w.total_lost_usdc, 0) as total_lost_usdc,
+        COALESCE(w.total_won_usdc, 0) - COALESCE(w.total_lost_usdc, 0) - COALESCE(w.total_rake_paid_usdc, 0) as net_profit_usdc
+      FROM agents a
+      LEFT JOIN wallets w ON a.id = w.agent_id
+      WHERE a.games_played > 0
+      ORDER BY a.elo_rating DESC
       LIMIT ?
     `,
     args: [limit],
@@ -714,6 +726,9 @@ export async function getLeaderboard(limit: number = 50, difficulty?: string): P
     losses: row.losses as number,
     winRate: Math.round((row.win_rate as number) * 10) / 10,
     avgSolveMs: row.avg_solve_ms ? Math.round(row.avg_solve_ms as number) : null,
+    totalWonUsdc: (row.total_won_usdc as number) || 0,
+    totalLostUsdc: (row.total_lost_usdc as number) || 0,
+    netProfitUsdc: (row.net_profit_usdc as number) || 0,
   }));
 }
 
@@ -755,6 +770,10 @@ export async function getPlatformStats(): Promise<PlatformStats> {
     totalGames: (row?.total_games as number) || 0,
     activeGames: (row?.active_games as number) || 0,
     gamesLast24h: (row?.games_last_24h as number) || 0,
+    // Wagering stats
+    totalWageredUsdc: (row?.total_wagered_usdc as number) || 0,
+    totalPayoutsUsdc: (row?.total_payouts_usdc as number) || 0,
+    totalRakeCollectedUsdc: (row?.total_rake_collected_usdc as number) || 0,
   };
 }
 

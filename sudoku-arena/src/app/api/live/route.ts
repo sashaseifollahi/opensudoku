@@ -28,6 +28,12 @@ export async function GET(request: NextRequest) {
         state: game.state,
         difficulty: game.difficulty,
         elapsed,
+        // Wager info
+        wager: game.wagerAmountUsdc > 0 ? {
+          amount: game.wagerAmountUsdc,
+          pot: game.wagerAmountUsdc * 2,
+          potentialWin: game.wagerAmountUsdc * 2 * 0.95, // After 5% rake
+        } : null,
         player1: player1 ? {
           id: player1.id,
           name: player1.name,

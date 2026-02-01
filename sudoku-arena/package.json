@@ -13,7 +13,8 @@
     "next": "^14.0.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "uuid": "^9.0.0"
+    "uuid": "^9.0.0",
+    "viem": "^2.45.1"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
