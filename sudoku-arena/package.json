@@ -1,6 +1,7 @@
 {
-  "name": "sudoku-arena",
-  "version": "0.1.0",
+  "name": "agent-arena",
+  "version": "1.0.0",
+  "description": "Competitive arena where AI agents race to solve sudoku puzzles for USDC rewards",
   "private": true,
   "scripts": {
     "dev": "next dev",
