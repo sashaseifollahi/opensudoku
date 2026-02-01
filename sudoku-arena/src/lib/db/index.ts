@@ -72,9 +72,49 @@ CREATE TABLE IF NOT EXISTS games (
   player2_time_ms INTEGER,
   player1_elo_change INTEGER,
   player2_elo_change INTEGER,
+  -- Wager fields
+  wager_amount_usdc REAL DEFAULT 0,
+  is_ranked INTEGER DEFAULT 1,
+  player1_wager_locked INTEGER DEFAULT 0,
+  player2_wager_locked INTEGER DEFAULT 0,
+  pot_amount_usdc REAL DEFAULT 0,
+  house_rake_usdc REAL DEFAULT 0,
+  winner_payout_usdc REAL DEFAULT 0,
   created_at TEXT DEFAULT (datetime('now')),
   started_at TEXT,
   finished_at TEXT
+);
+
+-- Wallets for agent funds (USDC on Base)
+CREATE TABLE IF NOT EXISTS wallets (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT UNIQUE NOT NULL REFERENCES agents(id),
+  address TEXT,
+  balance_usdc REAL DEFAULT 0,
+  locked_usdc REAL DEFAULT 0,
+  total_deposited_usdc REAL DEFAULT 0,
+  total_withdrawn_usdc REAL DEFAULT 0,
+  total_won_usdc REAL DEFAULT 0,
+  total_lost_usdc REAL DEFAULT 0,
+  total_rake_paid_usdc REAL DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Transaction history for audit trail
+CREATE TABLE IF NOT EXISTS transactions (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL REFERENCES agents(id),
+  wallet_id TEXT NOT NULL REFERENCES wallets(id),
+  game_id TEXT REFERENCES games(id),
+  tx_type TEXT NOT NULL,
+  amount_usdc REAL NOT NULL,
+  balance_before_usdc REAL,
+  balance_after_usdc REAL,
+  external_tx_hash TEXT,
+  status TEXT DEFAULT 'pending',
+  description TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS moves (
@@ -94,6 +134,10 @@ CREATE TABLE IF NOT EXISTS platform_stats (
   total_games INTEGER DEFAULT 0,
   active_games INTEGER DEFAULT 0,
   games_last_24h INTEGER DEFAULT 0,
+  -- Wager stats
+  total_wagered_usdc REAL DEFAULT 0,
+  total_rake_collected_usdc REAL DEFAULT 0,
+  total_payouts_usdc REAL DEFAULT 0,
   updated_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -104,6 +148,9 @@ CREATE INDEX IF NOT EXISTS idx_games_state ON games(state);
 CREATE INDEX IF NOT EXISTS idx_games_player1 ON games(player1_id);
 CREATE INDEX IF NOT EXISTS idx_games_player2 ON games(player2_id);
 CREATE INDEX IF NOT EXISTS idx_moves_game ON moves(game_id);
+CREATE INDEX IF NOT EXISTS idx_wallets_agent ON wallets(agent_id);
+CREATE INDEX IF NOT EXISTS idx_transactions_agent ON transactions(agent_id);
+CREATE INDEX IF NOT EXISTS idx_transactions_game ON transactions(game_id);
 `;
 
 // Initialize database schema
@@ -172,9 +219,56 @@ export interface Game {
   player2TimeMs: number | null;
   player1EloChange: number | null;
   player2EloChange: number | null;
+  // Wager fields
+  wagerAmountUsdc: number;
+  isRanked: boolean;
+  player1WagerLocked: boolean;
+  player2WagerLocked: boolean;
+  potAmountUsdc: number;
+  houseRakeUsdc: number;
+  winnerPayoutUsdc: number;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+}
+
+export interface Wallet {
+  id: string;
+  agentId: string;
+  address: string | null;
+  balanceUsdc: number;
+  lockedUsdc: number;
+  totalDepositedUsdc: number;
+  totalWithdrawnUsdc: number;
+  totalWonUsdc: number;
+  totalLostUsdc: number;
+  totalRakePaidUsdc: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type TransactionType =
+  | 'deposit'
+  | 'withdrawal'
+  | 'wager_lock'
+  | 'wager_unlock'
+  | 'win_payout'
+  | 'loss_debit'
+  | 'rake';
+
+export interface Transaction {
+  id: string;
+  agentId: string;
+  walletId: string;
+  gameId: string | null;
+  txType: TransactionType;
+  amountUsdc: number;
+  balanceBeforeUsdc: number;
+  balanceAfterUsdc: number;
+  externalTxHash: string | null;
+  status: 'pending' | 'completed' | 'failed';
+  description: string | null;
+  createdAt: string;
 }
 
 export interface Move {
@@ -261,9 +355,51 @@ function mapRowToGame(row: Record<string, unknown>): Game {
     player2TimeMs: row.player2_time_ms as number | null,
     player1EloChange: row.player1_elo_change as number | null,
     player2EloChange: row.player2_elo_change as number | null,
+    // Wager fields
+    wagerAmountUsdc: (row.wager_amount_usdc as number) || 0,
+    isRanked: (row.is_ranked as number) === 1,
+    player1WagerLocked: (row.player1_wager_locked as number) === 1,
+    player2WagerLocked: (row.player2_wager_locked as number) === 1,
+    potAmountUsdc: (row.pot_amount_usdc as number) || 0,
+    houseRakeUsdc: (row.house_rake_usdc as number) || 0,
+    winnerPayoutUsdc: (row.winner_payout_usdc as number) || 0,
     createdAt: row.created_at as string,
     startedAt: row.started_at as string | null,
     finishedAt: row.finished_at as string | null,
+  };
+}
+
+function mapRowToWallet(row: Record<string, unknown>): Wallet {
+  return {
+    id: row.id as string,
+    agentId: row.agent_id as string,
+    address: row.address as string | null,
+    balanceUsdc: (row.balance_usdc as number) || 0,
+    lockedUsdc: (row.locked_usdc as number) || 0,
+    totalDepositedUsdc: (row.total_deposited_usdc as number) || 0,
+    totalWithdrawnUsdc: (row.total_withdrawn_usdc as number) || 0,
+    totalWonUsdc: (row.total_won_usdc as number) || 0,
+    totalLostUsdc: (row.total_lost_usdc as number) || 0,
+    totalRakePaidUsdc: (row.total_rake_paid_usdc as number) || 0,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+  };
+}
+
+function mapRowToTransaction(row: Record<string, unknown>): Transaction {
+  return {
+    id: row.id as string,
+    agentId: row.agent_id as string,
+    walletId: row.wallet_id as string,
+    gameId: row.game_id as string | null,
+    txType: row.tx_type as TransactionType,
+    amountUsdc: row.amount_usdc as number,
+    balanceBeforeUsdc: row.balance_before_usdc as number,
+    balanceAfterUsdc: row.balance_after_usdc as number,
+    externalTxHash: row.external_tx_hash as string | null,
+    status: row.status as Transaction['status'],
+    description: row.description as string | null,
+    createdAt: row.created_at as string,
   };
 }
 
@@ -280,6 +416,9 @@ export async function createAgent(name: string, description?: string): Promise<A
     sql: `INSERT INTO agents (id, api_key, name, description) VALUES (?, ?, ?, ?)`,
     args: [id, apiKey, name, description || null],
   });
+
+  // Create wallet for the agent
+  await createWallet(id);
 
   // Update platform stats
   await db.execute(`UPDATE platform_stats SET total_agents = total_agents + 1 WHERE id = 'global'`);
@@ -639,11 +778,417 @@ export function calculateEloChange(
 }
 
 // ============================================================================
+// Wallet Operations
+// ============================================================================
+
+const HOUSE_RAKE_PERCENT = 5; // 5% rake on wagered games
+
+export async function createWallet(agentId: string): Promise<Wallet> {
+  await initDb();
+  const id = generateId();
+
+  await db.execute({
+    sql: `INSERT INTO wallets (id, agent_id) VALUES (?, ?)`,
+    args: [id, agentId],
+  });
+
+  return (await getWalletByAgentId(agentId))!;
+}
+
+export async function getWalletByAgentId(agentId: string): Promise<Wallet | null> {
+  await initDb();
+  const result = await db.execute({
+    sql: `SELECT * FROM wallets WHERE agent_id = ?`,
+    args: [agentId],
+  });
+
+  if (result.rows.length === 0) return null;
+  return mapRowToWallet(result.rows[0] as Record<string, unknown>);
+}
+
+export async function getWalletById(id: string): Promise<Wallet | null> {
+  await initDb();
+  const result = await db.execute({
+    sql: `SELECT * FROM wallets WHERE id = ?`,
+    args: [id],
+  });
+
+  if (result.rows.length === 0) return null;
+  return mapRowToWallet(result.rows[0] as Record<string, unknown>);
+}
+
+export async function depositToWallet(
+  agentId: string,
+  amountUsdc: number,
+  externalTxHash?: string
+): Promise<{ wallet: Wallet; transaction: Transaction }> {
+  await initDb();
+  const wallet = await getWalletByAgentId(agentId);
+  if (!wallet) throw new Error('Wallet not found');
+
+  const newBalance = wallet.balanceUsdc + amountUsdc;
+  const txId = generateId();
+
+  // Update wallet balance
+  await db.execute({
+    sql: `
+      UPDATE wallets SET
+        balance_usdc = ?,
+        total_deposited_usdc = total_deposited_usdc + ?,
+        updated_at = datetime('now')
+      WHERE agent_id = ?
+    `,
+    args: [newBalance, amountUsdc, agentId],
+  });
+
+  // Record transaction
+  await db.execute({
+    sql: `
+      INSERT INTO transactions (id, agent_id, wallet_id, tx_type, amount_usdc, balance_before_usdc, balance_after_usdc, external_tx_hash, status, description)
+      VALUES (?, ?, ?, 'deposit', ?, ?, ?, ?, 'completed', 'Deposit to wallet')
+    `,
+    args: [txId, agentId, wallet.id, amountUsdc, wallet.balanceUsdc, newBalance, externalTxHash || null],
+  });
+
+  const updatedWallet = (await getWalletByAgentId(agentId))!;
+  const transaction = (await getTransactionById(txId))!;
+
+  return { wallet: updatedWallet, transaction };
+}
+
+export async function withdrawFromWallet(
+  agentId: string,
+  amountUsdc: number
+): Promise<{ wallet: Wallet; transaction: Transaction }> {
+  await initDb();
+  const wallet = await getWalletByAgentId(agentId);
+  if (!wallet) throw new Error('Wallet not found');
+
+  const availableBalance = wallet.balanceUsdc - wallet.lockedUsdc;
+  if (amountUsdc > availableBalance) {
+    throw new Error(`Insufficient balance. Available: ${availableBalance} USDC`);
+  }
+
+  const newBalance = wallet.balanceUsdc - amountUsdc;
+  const txId = generateId();
+
+  // Update wallet balance
+  await db.execute({
+    sql: `
+      UPDATE wallets SET
+        balance_usdc = ?,
+        total_withdrawn_usdc = total_withdrawn_usdc + ?,
+        updated_at = datetime('now')
+      WHERE agent_id = ?
+    `,
+    args: [newBalance, amountUsdc, agentId],
+  });
+
+  // Record transaction
+  await db.execute({
+    sql: `
+      INSERT INTO transactions (id, agent_id, wallet_id, tx_type, amount_usdc, balance_before_usdc, balance_after_usdc, status, description)
+      VALUES (?, ?, ?, 'withdrawal', ?, ?, ?, 'pending', 'Withdrawal request')
+    `,
+    args: [txId, agentId, wallet.id, amountUsdc, wallet.balanceUsdc, newBalance],
+  });
+
+  const updatedWallet = (await getWalletByAgentId(agentId))!;
+  const transaction = (await getTransactionById(txId))!;
+
+  return { wallet: updatedWallet, transaction };
+}
+
+export async function lockWagerFunds(
+  agentId: string,
+  gameId: string,
+  amountUsdc: number
+): Promise<boolean> {
+  await initDb();
+  const wallet = await getWalletByAgentId(agentId);
+  if (!wallet) return false;
+
+  const availableBalance = wallet.balanceUsdc - wallet.lockedUsdc;
+  if (amountUsdc > availableBalance) return false;
+
+  const txId = generateId();
+
+  // Lock funds in wallet
+  await db.execute({
+    sql: `
+      UPDATE wallets SET
+        locked_usdc = locked_usdc + ?,
+        updated_at = datetime('now')
+      WHERE agent_id = ?
+    `,
+    args: [amountUsdc, agentId],
+  });
+
+  // Record transaction
+  await db.execute({
+    sql: `
+      INSERT INTO transactions (id, agent_id, wallet_id, game_id, tx_type, amount_usdc, balance_before_usdc, balance_after_usdc, status, description)
+      VALUES (?, ?, ?, ?, 'wager_lock', ?, ?, ?, 'completed', 'Wager locked for game')
+    `,
+    args: [txId, agentId, wallet.id, gameId, amountUsdc, wallet.balanceUsdc, wallet.balanceUsdc],
+  });
+
+  return true;
+}
+
+export async function unlockWagerFunds(
+  agentId: string,
+  gameId: string,
+  amountUsdc: number
+): Promise<void> {
+  await initDb();
+  const wallet = await getWalletByAgentId(agentId);
+  if (!wallet) return;
+
+  const txId = generateId();
+
+  // Unlock funds in wallet
+  await db.execute({
+    sql: `
+      UPDATE wallets SET
+        locked_usdc = MAX(0, locked_usdc - ?),
+        updated_at = datetime('now')
+      WHERE agent_id = ?
+    `,
+    args: [amountUsdc, agentId],
+  });
+
+  // Record transaction
+  await db.execute({
+    sql: `
+      INSERT INTO transactions (id, agent_id, wallet_id, game_id, tx_type, amount_usdc, balance_before_usdc, balance_after_usdc, status, description)
+      VALUES (?, ?, ?, ?, 'wager_unlock', ?, ?, ?, 'completed', 'Wager unlocked - game cancelled')
+    `,
+    args: [txId, agentId, wallet.id, gameId, amountUsdc, wallet.balanceUsdc, wallet.balanceUsdc],
+  });
+}
+
+export async function getTransactionById(id: string): Promise<Transaction | null> {
+  await initDb();
+  const result = await db.execute({
+    sql: `SELECT * FROM transactions WHERE id = ?`,
+    args: [id],
+  });
+
+  if (result.rows.length === 0) return null;
+  return mapRowToTransaction(result.rows[0] as Record<string, unknown>);
+}
+
+export async function getTransactionsByAgentId(agentId: string, limit: number = 50): Promise<Transaction[]> {
+  await initDb();
+  const result = await db.execute({
+    sql: `SELECT * FROM transactions WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?`,
+    args: [agentId, limit],
+  });
+
+  return result.rows.map(row => mapRowToTransaction(row as Record<string, unknown>));
+}
+
+// ============================================================================
+// Wager Settlement
+// ============================================================================
+
+export async function settleWager(
+  gameId: string,
+  winnerId: string,
+  loserId: string
+): Promise<{ winnerPayout: number; houseRake: number }> {
+  await initDb();
+  const game = await getGameById(gameId);
+  if (!game || game.wagerAmountUsdc <= 0) {
+    return { winnerPayout: 0, houseRake: 0 };
+  }
+
+  const potAmount = game.wagerAmountUsdc * 2;
+  const houseRake = potAmount * (HOUSE_RAKE_PERCENT / 100);
+  const winnerPayout = potAmount - houseRake;
+
+  const winnerWallet = await getWalletByAgentId(winnerId);
+  const loserWallet = await getWalletByAgentId(loserId);
+
+  if (!winnerWallet || !loserWallet) {
+    throw new Error('Wallet not found for settlement');
+  }
+
+  // Deduct from loser (already locked, now remove from balance)
+  await db.execute({
+    sql: `
+      UPDATE wallets SET
+        balance_usdc = balance_usdc - ?,
+        locked_usdc = MAX(0, locked_usdc - ?),
+        total_lost_usdc = total_lost_usdc + ?,
+        updated_at = datetime('now')
+      WHERE agent_id = ?
+    `,
+    args: [game.wagerAmountUsdc, game.wagerAmountUsdc, game.wagerAmountUsdc, loserId],
+  });
+
+  // Credit winner (unlock their wager + add winnings)
+  await db.execute({
+    sql: `
+      UPDATE wallets SET
+        balance_usdc = balance_usdc + ?,
+        locked_usdc = MAX(0, locked_usdc - ?),
+        total_won_usdc = total_won_usdc + ?,
+        total_rake_paid_usdc = total_rake_paid_usdc + ?,
+        updated_at = datetime('now')
+      WHERE agent_id = ?
+    `,
+    args: [winnerPayout - game.wagerAmountUsdc, game.wagerAmountUsdc, winnerPayout - game.wagerAmountUsdc, houseRake / 2, winnerId],
+  });
+
+  // Update loser's rake paid
+  await db.execute({
+    sql: `UPDATE wallets SET total_rake_paid_usdc = total_rake_paid_usdc + ? WHERE agent_id = ?`,
+    args: [houseRake / 2, loserId],
+  });
+
+  // Record transactions
+  const winnerTxId = generateId();
+  const loserTxId = generateId();
+  const rakeTxId = generateId();
+
+  await db.execute({
+    sql: `
+      INSERT INTO transactions (id, agent_id, wallet_id, game_id, tx_type, amount_usdc, balance_before_usdc, balance_after_usdc, status, description)
+      VALUES (?, ?, ?, ?, 'win_payout', ?, ?, ?, 'completed', 'Game won - payout received')
+    `,
+    args: [winnerTxId, winnerId, winnerWallet.id, gameId, winnerPayout, winnerWallet.balanceUsdc, winnerWallet.balanceUsdc + winnerPayout - game.wagerAmountUsdc],
+  });
+
+  await db.execute({
+    sql: `
+      INSERT INTO transactions (id, agent_id, wallet_id, game_id, tx_type, amount_usdc, balance_before_usdc, balance_after_usdc, status, description)
+      VALUES (?, ?, ?, ?, 'loss_debit', ?, ?, ?, 'completed', 'Game lost - wager forfeited')
+    `,
+    args: [loserTxId, loserId, loserWallet.id, gameId, game.wagerAmountUsdc, loserWallet.balanceUsdc, loserWallet.balanceUsdc - game.wagerAmountUsdc],
+  });
+
+  // Update game with settlement info
+  await db.execute({
+    sql: `
+      UPDATE games SET
+        pot_amount_usdc = ?,
+        house_rake_usdc = ?,
+        winner_payout_usdc = ?
+      WHERE id = ?
+    `,
+    args: [potAmount, houseRake, winnerPayout, gameId],
+  });
+
+  // Update platform stats
+  await db.execute({
+    sql: `
+      UPDATE platform_stats SET
+        total_wagered_usdc = total_wagered_usdc + ?,
+        total_rake_collected_usdc = total_rake_collected_usdc + ?,
+        total_payouts_usdc = total_payouts_usdc + ?
+      WHERE id = 'global'
+    `,
+    args: [potAmount, houseRake, winnerPayout],
+  });
+
+  return { winnerPayout, houseRake };
+}
+
+export async function createWageredGame(
+  difficulty: string,
+  puzzle: string,
+  solution: string,
+  player1Id: string,
+  wagerAmountUsdc: number
+): Promise<Game | null> {
+  await initDb();
+
+  // Check if player has sufficient balance
+  const wallet = await getWalletByAgentId(player1Id);
+  if (!wallet) return null;
+
+  const availableBalance = wallet.balanceUsdc - wallet.lockedUsdc;
+  if (wagerAmountUsdc > availableBalance) return null;
+
+  const id = generateId();
+
+  // Lock the wager funds
+  const locked = await lockWagerFunds(player1Id, id, wagerAmountUsdc);
+  if (!locked) return null;
+
+  await db.execute({
+    sql: `
+      INSERT INTO games (id, difficulty, puzzle, solution, player1_id, player1_board, wager_amount_usdc, player1_wager_locked, is_ranked)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1)
+    `,
+    args: [id, difficulty, puzzle, solution, player1Id, puzzle, wagerAmountUsdc],
+  });
+
+  return getGameById(id);
+}
+
+export async function joinWageredGame(gameId: string, playerId: string): Promise<Game | null> {
+  await initDb();
+  const game = await getGameById(gameId);
+  if (!game || game.state !== 'waiting') return null;
+  if (game.player1Id === playerId) return null;
+
+  // Check if player has sufficient balance for the wager
+  const wallet = await getWalletByAgentId(playerId);
+  if (!wallet) return null;
+
+  const availableBalance = wallet.balanceUsdc - wallet.lockedUsdc;
+  if (game.wagerAmountUsdc > availableBalance) return null;
+
+  // Lock the wager funds
+  const locked = await lockWagerFunds(playerId, gameId, game.wagerAmountUsdc);
+  if (!locked) return null;
+
+  await db.execute({
+    sql: `
+      UPDATE games SET
+        player2_id = ?,
+        player2_board = puzzle,
+        player2_wager_locked = 1,
+        state = 'countdown',
+        started_at = datetime('now')
+      WHERE id = ? AND state = 'waiting'
+    `,
+    args: [playerId, gameId],
+  });
+
+  return getGameById(gameId);
+}
+
+// ============================================================================
 // Cleanup
 // ============================================================================
 
 export async function cleanupOldGames(maxAgeMinutes: number = 60): Promise<number> {
   await initDb();
+
+  // First, refund wagers for abandoned games
+  const abandonedGames = await db.execute({
+    sql: `
+      SELECT id, player1_id, wager_amount_usdc FROM games
+      WHERE state = 'waiting'
+      AND wager_amount_usdc > 0
+      AND created_at < datetime('now', '-' || ? || ' minutes')
+    `,
+    args: [maxAgeMinutes],
+  });
+
+  for (const row of abandonedGames.rows) {
+    const gameId = row.id as string;
+    const playerId = row.player1_id as string;
+    const wagerAmount = row.wager_amount_usdc as number;
+    if (playerId && wagerAmount > 0) {
+      await unlockWagerFunds(playerId, gameId, wagerAmount);
+    }
+  }
+
   const result = await db.execute({
     sql: `
       DELETE FROM games
@@ -655,6 +1200,16 @@ export async function cleanupOldGames(maxAgeMinutes: number = 60): Promise<numbe
 
   return result.rowsAffected;
 }
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+export const WAGER_CONFIG = {
+  minWagerUsdc: 1,
+  maxWagerUsdc: 1000,
+  houseRakePercent: HOUSE_RAKE_PERCENT,
+};
 
 // Export the database client for direct queries if needed
 export { db };

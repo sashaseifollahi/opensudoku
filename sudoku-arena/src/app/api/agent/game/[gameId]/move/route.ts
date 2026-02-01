@@ -182,12 +182,28 @@ export async function POST(
         });
       }
 
+      // Settle wager if this was a wagered game
+      let wagerResult = null;
+      if (game.wagerAmountUsdc > 0 && opponentId) {
+        try {
+          const settlement = await db.settleWager(game.id, agent.id, opponentId);
+          wagerResult = {
+            wagerAmount: game.wagerAmountUsdc,
+            payout: settlement.winnerPayout,
+            rake: settlement.houseRake,
+          };
+        } catch (error) {
+          console.error('Wager settlement error:', error);
+        }
+      }
+
       result = {
         finished: true,
         won: true,
         timeMs: solveTimeMs,
         eloChange: winnerEloChange,
         newElo: agent.eloRating + winnerEloChange,
+        wager: wagerResult,
       };
     } else {
       // Just update move count
