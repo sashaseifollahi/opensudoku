@@ -1,6 +1,20 @@
 import { Board, BOARD_SIZE } from './Board';
+import { randomBytes } from 'crypto';
 
 export type Difficulty = 'easy' | 'medium' | 'hard' | 'expert';
+
+/**
+ * Cryptographically secure random number generator
+ * Uses crypto.randomBytes instead of Math.random for unpredictable puzzle generation
+ */
+function secureRandom(): number {
+  const buffer = randomBytes(4);
+  return buffer.readUInt32BE(0) / 0xffffffff;
+}
+
+function secureRandomInt(max: number): number {
+  return Math.floor(secureRandom() * max);
+}
 
 const CLUES_BY_DIFFICULTY: Record<Difficulty, [number, number]> = {
   easy: [36, 45],
@@ -16,10 +30,14 @@ export class PuzzleGenerator {
   /**
    * Generate a new puzzle with the given difficulty.
    */
+  /**
+   * Generate a new puzzle with the given difficulty.
+   * Uses cryptographically secure random generation for fairness.
+   */
   static generate(difficulty: Difficulty = 'medium'): { puzzle: string; solution: string } {
     const solution = this.generateSolution();
     const [minClues, maxClues] = CLUES_BY_DIFFICULTY[difficulty];
-    const targetClues = minClues + Math.floor(Math.random() * (maxClues - minClues + 1));
+    const targetClues = minClues + secureRandomInt(maxClues - minClues + 1);
     const puzzle = this.createPuzzle(solution, targetClues);
 
     return { puzzle, solution };
@@ -182,10 +200,14 @@ export class PuzzleGenerator {
     return true;
   }
 
+  /**
+   * Cryptographically secure Fisher-Yates shuffle
+   * Uses crypto.randomBytes for unpredictable shuffling
+   */
   private static shuffle<T>(array: T[]): T[] {
     const result = [...array];
     for (let i = result.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
+      const j = secureRandomInt(i + 1);
       [result[i], result[j]] = [result[j], result[i]];
     }
     return result;
@@ -222,22 +244,5 @@ export class PuzzleGenerator {
   }
 }
 
-// Pre-made puzzles for quick starts
-export const SAMPLE_PUZZLES: Record<Difficulty, string[]> = {
-  easy: [
-    '530070000600195000098000060800060003400803001700020006060000280000419005000080079',
-    '200080300060070084030500209000105408000000000402706000301007040720040060004010003',
-  ],
-  medium: [
-    '000000907000420180000705026100904000050000040000507009920108000034059000507000000',
-    '030000080009000500007509200700105008020090030900402001004207100002000800070000090',
-  ],
-  hard: [
-    '000700000100000000000430200000000006000509000000000418000081000002000050040000300',
-    '020000000000600003074000008000003002080040010600500000300000570500009000000000040',
-  ],
-  expert: [
-    '000000000000003085001020000000507000004000100090000000500000073002010000000040009',
-    '100007090030020008009600500005300900010080002600004000300000010040000007007000300',
-  ],
-};
+// SECURITY: Pre-made puzzles have been removed to prevent memorization attacks
+// All puzzles are now generated fresh with cryptographically secure randomness

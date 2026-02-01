@@ -2,6 +2,7 @@ import { createClient, Client } from '@libsql/client';
 import { randomBytes } from 'crypto';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as gameCrypto from '../crypto';
 
 // ============================================================================
 // Database Client Setup - Supports both Turso (production) and local SQLite
@@ -58,6 +59,8 @@ CREATE TABLE IF NOT EXISTS games (
   difficulty TEXT NOT NULL,
   puzzle TEXT NOT NULL,
   solution TEXT NOT NULL,
+  solution_hash TEXT,
+  integrity_hash TEXT,
   player1_id TEXT REFERENCES agents(id),
   player2_id TEXT REFERENCES agents(id),
   state TEXT DEFAULT 'waiting',
@@ -67,6 +70,8 @@ CREATE TABLE IF NOT EXISTS games (
   player2_mistakes INTEGER DEFAULT 0,
   player1_board TEXT,
   player2_board TEXT,
+  player1_move_seq INTEGER DEFAULT 0,
+  player2_move_seq INTEGER DEFAULT 0,
   winner_id TEXT REFERENCES agents(id),
   player1_time_ms INTEGER,
   player2_time_ms INTEGER,
@@ -83,6 +88,7 @@ CREATE TABLE IF NOT EXISTS games (
   pot_amount_usdc REAL DEFAULT 0,
   house_rake_usdc REAL DEFAULT 0,
   winner_payout_usdc REAL DEFAULT 0,
+  settled_at TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   started_at TEXT,
   finished_at TEXT
@@ -281,6 +287,12 @@ export interface Game {
   difficulty: string;
   puzzle: string;
   solution: string;
+  // Security fields
+  solutionHash: string | null;
+  integrityHash: string | null;
+  player1MoveSeq: number;
+  player2MoveSeq: number;
+  // Player fields
   player1Id: string | null;
   player2Id: string | null;
   state: 'waiting' | 'countdown' | 'playing' | 'finished';
@@ -306,6 +318,7 @@ export interface Game {
   potAmountUsdc: number;
   houseRakeUsdc: number;
   winnerPayoutUsdc: number;
+  settledAt: string | null;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
@@ -492,6 +505,12 @@ function mapRowToGame(row: Record<string, unknown>): Game {
     difficulty: row.difficulty as string,
     puzzle: row.puzzle as string,
     solution: row.solution as string,
+    // Security fields
+    solutionHash: row.solution_hash as string | null,
+    integrityHash: row.integrity_hash as string | null,
+    player1MoveSeq: (row.player1_move_seq as number) || 0,
+    player2MoveSeq: (row.player2_move_seq as number) || 0,
+    // Player fields
     player1Id: row.player1_id as string | null,
     player2Id: row.player2_id as string | null,
     state: row.state as Game['state'],
@@ -517,6 +536,7 @@ function mapRowToGame(row: Record<string, unknown>): Game {
     potAmountUsdc: (row.pot_amount_usdc as number) || 0,
     houseRakeUsdc: (row.house_rake_usdc as number) || 0,
     winnerPayoutUsdc: (row.winner_payout_usdc as number) || 0,
+    settledAt: row.settled_at as string | null,
     createdAt: row.created_at as string,
     startedAt: row.started_at as string | null,
     finishedAt: row.finished_at as string | null,
@@ -662,10 +682,16 @@ export async function incrementAgentStats(
 export async function createGame(difficulty: string, puzzle: string, solution: string, player1Id?: string): Promise<Game> {
   await initDb();
   const id = generateId();
+  const createdAt = new Date().toISOString();
+
+  // Generate security hashes
+  const solutionHash = gameCrypto.hashSolution(solution, id);
+  const integrityHash = gameCrypto.createGameIntegrityHash(id, puzzle, solution, difficulty, createdAt, 0);
 
   await db.execute({
-    sql: `INSERT INTO games (id, difficulty, puzzle, solution, player1_id, player1_board) VALUES (?, ?, ?, ?, ?, ?)`,
-    args: [id, difficulty, puzzle, solution, player1Id || null, puzzle],
+    sql: `INSERT INTO games (id, difficulty, puzzle, solution, solution_hash, integrity_hash, player1_id, player1_board, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [id, difficulty, puzzle, solution, solutionHash, integrityHash, player1Id || null, puzzle, createdAt],
   });
 
   return (await getGameById(id))!;
@@ -753,22 +779,28 @@ export async function updatePlayerProgress(
   progress: number,
   mistakes: number,
   board: string
-): Promise<void> {
+): Promise<{ moveSeq: number }> {
   await initDb();
   const game = await getGameById(gameId);
-  if (!game) return;
+  if (!game) return { moveSeq: 0 };
+
+  let newMoveSeq = 0;
 
   if (game.player1Id === playerId) {
+    newMoveSeq = game.player1MoveSeq + 1;
     await db.execute({
-      sql: `UPDATE games SET player1_progress = ?, player1_mistakes = ?, player1_board = ? WHERE id = ?`,
-      args: [progress, mistakes, board, gameId],
+      sql: `UPDATE games SET player1_progress = ?, player1_mistakes = ?, player1_board = ?, player1_move_seq = ? WHERE id = ?`,
+      args: [progress, mistakes, board, newMoveSeq, gameId],
     });
   } else if (game.player2Id === playerId) {
+    newMoveSeq = game.player2MoveSeq + 1;
     await db.execute({
-      sql: `UPDATE games SET player2_progress = ?, player2_mistakes = ?, player2_board = ? WHERE id = ?`,
-      args: [progress, mistakes, board, gameId],
+      sql: `UPDATE games SET player2_progress = ?, player2_mistakes = ?, player2_board = ?, player2_move_seq = ? WHERE id = ?`,
+      args: [progress, mistakes, board, newMoveSeq, gameId],
     });
   }
+
+  return { moveSeq: newMoveSeq };
 }
 
 export async function finishGame(
@@ -1169,6 +1201,28 @@ export async function settleWager(
     return { winnerPayout: 0, houseRake: 0 };
   }
 
+  // IDEMPOTENCY CHECK: Prevent double settlement
+  if (game.settledAt) {
+    console.warn(`Game ${gameId} already settled at ${game.settledAt}. Skipping duplicate settlement.`);
+    return { winnerPayout: game.winnerPayoutUsdc, houseRake: game.houseRakeUsdc };
+  }
+
+  // INTEGRITY CHECK: Verify game hasn't been tampered with
+  if (game.integrityHash) {
+    const isValid = gameCrypto.verifyGameIntegrity(
+      game.id,
+      game.puzzle,
+      game.solution,
+      game.difficulty,
+      game.createdAt,
+      game.wagerAmountUsdc,
+      game.integrityHash
+    );
+    if (!isValid) {
+      throw new Error(`Game integrity check failed for game ${gameId}. Settlement blocked.`);
+    }
+  }
+
   const potAmount = game.wagerAmountUsdc * 2;
   const houseRake = potAmount * (HOUSE_RAKE_PERCENT / 100);
   const winnerPayout = potAmount - houseRake;
@@ -1234,13 +1288,14 @@ export async function settleWager(
     args: [loserTxId, loserId, loserWallet.id, gameId, game.wagerAmountUsdc, loserWallet.balanceUsdc, loserWallet.balanceUsdc - game.wagerAmountUsdc],
   });
 
-  // Update game with settlement info
+  // Update game with settlement info and mark as settled (idempotency)
   await db.execute({
     sql: `
       UPDATE games SET
         pot_amount_usdc = ?,
         house_rake_usdc = ?,
-        winner_payout_usdc = ?
+        winner_payout_usdc = ?,
+        settled_at = datetime('now')
       WHERE id = ?
     `,
     args: [potAmount, houseRake, winnerPayout, gameId],
@@ -1278,6 +1333,11 @@ export async function createWageredGame(
   if (wagerAmountUsdc > availableBalance) return null;
 
   const id = generateId();
+  const createdAt = new Date().toISOString();
+
+  // Generate security hashes
+  const solutionHash = gameCrypto.hashSolution(solution, id);
+  const integrityHash = gameCrypto.createGameIntegrityHash(id, puzzle, solution, difficulty, createdAt, wagerAmountUsdc);
 
   // Lock the wager funds
   const locked = await lockWagerFunds(player1Id, id, wagerAmountUsdc);
@@ -1285,10 +1345,10 @@ export async function createWageredGame(
 
   await db.execute({
     sql: `
-      INSERT INTO games (id, difficulty, puzzle, solution, player1_id, player1_board, wager_amount_usdc, player1_wager_locked, is_ranked)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1)
+      INSERT INTO games (id, difficulty, puzzle, solution, solution_hash, integrity_hash, player1_id, player1_board, wager_amount_usdc, player1_wager_locked, is_ranked, game_mode, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 'pot', ?)
     `,
-    args: [id, difficulty, puzzle, solution, player1Id, puzzle, wagerAmountUsdc],
+    args: [id, difficulty, puzzle, solution, solutionHash, integrityHash, player1Id, puzzle, wagerAmountUsdc, createdAt],
   });
 
   return getGameById(id);

@@ -11,7 +11,6 @@ export {
 } from './Game';
 export {
   PuzzleGenerator,
-  SAMPLE_PUZZLES,
   type Difficulty,
 } from './PuzzleGenerator';
 export {

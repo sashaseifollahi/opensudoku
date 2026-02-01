@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import * as db from '@/lib/db';
 import { validateApiKey } from '@/lib/auth';
+import * as gameCrypto from '@/lib/crypto';
 
 // POST /api/agent/game/[gameId]/move - Make a move
 export async function POST(
@@ -122,8 +123,11 @@ export async function POST(
     // Record the move
     await db.recordMove(game.id, agent.id, row, col, value, isCorrect);
 
-    // Update player progress in database
-    await db.updatePlayerProgress(game.id, agent.id, progress, mistakes, newBoard);
+    // Update player progress in database and get new move sequence
+    const { moveSeq } = await db.updatePlayerProgress(game.id, agent.id, progress, mistakes, newBoard);
+
+    // Sign the move for verification
+    const moveSignature = gameCrypto.signMove(game.id, agent.id, moveSeq, row, col, value);
 
     // Check if game is complete (all 81 cells correct)
     const isComplete = progress === 81;
@@ -251,6 +255,9 @@ export async function POST(
       mistakes,
       opponentProgress: Math.round((opponentProgress / 81) * 100) / 100,
       result,
+      // Security: Move sequence and signature for verification
+      moveSeq,
+      moveSignature,
     });
   } catch (error) {
     console.error('Move error:', error);
