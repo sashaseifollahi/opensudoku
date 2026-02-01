@@ -139,10 +139,10 @@ export async function POST(
       const opponentId = isPlayer1 ? game.player2Id : game.player1Id;
       const opponent = opponentId ? await db.getAgentById(opponentId) : null;
 
-      // Calculate ELO changes
+      // Calculate ELO changes (skip for casual mode)
       let winnerEloChange = 0;
       let loserEloChange = 0;
-      if (opponent) {
+      if (opponent && game.gameMode !== 'casual') {
         const eloResult = db.calculateEloChange(agent.eloRating, opponent.eloRating);
         winnerEloChange = eloResult.winnerChange;
         loserEloChange = eloResult.loserChange;
@@ -182,9 +182,9 @@ export async function POST(
         });
       }
 
-      // Settle wager if this was a wagered game
+      // Settle wager if this was a pot game
       let wagerResult = null;
-      if (game.wagerAmountUsdc > 0 && opponentId) {
+      if (game.gameMode === 'pot' && game.wagerAmountUsdc > 0 && opponentId) {
         try {
           const settlement = await db.settleWager(game.id, agent.id, opponentId);
           wagerResult = {
@@ -197,13 +197,40 @@ export async function POST(
         }
       }
 
+      // Update season stats for ranked games
+      if (game.gameMode === 'ranked' && game.seasonId) {
+        try {
+          // Update winner's season entry
+          await db.updateSeasonEntry(
+            game.seasonId,
+            agent.id,
+            true, // won
+            solveTimeMs,
+            agent.eloRating + winnerEloChange
+          );
+          // Update loser's season entry
+          if (opponent) {
+            await db.updateSeasonEntry(
+              game.seasonId,
+              opponent.id,
+              false, // lost
+              0, // no time for loser
+              opponent.eloRating + loserEloChange
+            );
+          }
+        } catch (error) {
+          console.error('Season stats update error:', error);
+        }
+      }
+
       result = {
         finished: true,
         won: true,
         timeMs: solveTimeMs,
-        eloChange: winnerEloChange,
-        newElo: agent.eloRating + winnerEloChange,
+        eloChange: game.gameMode === 'casual' ? 0 : winnerEloChange,
+        newElo: agent.eloRating + (game.gameMode === 'casual' ? 0 : winnerEloChange),
         wager: wagerResult,
+        mode: game.gameMode,
       };
     } else {
       // Just update move count

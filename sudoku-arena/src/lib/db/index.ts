@@ -72,7 +72,10 @@ CREATE TABLE IF NOT EXISTS games (
   player2_time_ms INTEGER,
   player1_elo_change INTEGER,
   player2_elo_change INTEGER,
-  -- Wager fields
+  -- Game mode and wager fields
+  game_mode TEXT DEFAULT 'ranked',
+  tournament_id TEXT REFERENCES tournaments(id),
+  season_id TEXT REFERENCES seasons(id),
   wager_amount_usdc REAL DEFAULT 0,
   is_ranked INTEGER DEFAULT 1,
   player1_wager_locked INTEGER DEFAULT 0,
@@ -151,6 +154,79 @@ CREATE INDEX IF NOT EXISTS idx_moves_game ON moves(game_id);
 CREATE INDEX IF NOT EXISTS idx_wallets_agent ON wallets(agent_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_agent ON transactions(agent_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_game ON transactions(game_id);
+
+-- Tournaments for bracket-style competition
+CREATE TABLE IF NOT EXISTS tournaments (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT,
+  difficulty TEXT NOT NULL,
+  entry_fee_usdc REAL DEFAULT 0,
+  prize_pool_usdc REAL DEFAULT 0,
+  house_contribution_usdc REAL DEFAULT 0,
+  max_participants INTEGER DEFAULT 32,
+  current_participants INTEGER DEFAULT 0,
+  state TEXT DEFAULT 'registration',
+  prize_distribution TEXT DEFAULT '{"1": 50, "2": 30, "3": 20}',
+  starts_at TEXT,
+  ends_at TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Tournament entries/participants
+CREATE TABLE IF NOT EXISTS tournament_entries (
+  id TEXT PRIMARY KEY,
+  tournament_id TEXT NOT NULL REFERENCES tournaments(id),
+  agent_id TEXT NOT NULL REFERENCES agents(id),
+  seed INTEGER,
+  games_won INTEGER DEFAULT 0,
+  games_lost INTEGER DEFAULT 0,
+  total_time_ms INTEGER DEFAULT 0,
+  placement INTEGER,
+  payout_usdc REAL DEFAULT 0,
+  eliminated INTEGER DEFAULT 0,
+  joined_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(tournament_id, agent_id)
+);
+
+-- Leaderboard seasons for periodic rewards
+CREATE TABLE IF NOT EXISTS seasons (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT,
+  reward_pool_usdc REAL DEFAULT 0,
+  house_funded_usdc REAL DEFAULT 0,
+  state TEXT DEFAULT 'active',
+  prize_distribution TEXT DEFAULT '{"1": 30, "2": 20, "3": 15, "4": 10, "5": 8, "6": 6, "7": 5, "8": 3, "9": 2, "10": 1}',
+  min_games_required INTEGER DEFAULT 10,
+  starts_at TEXT DEFAULT (datetime('now')),
+  ends_at TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Season participation tracking
+CREATE TABLE IF NOT EXISTS season_entries (
+  id TEXT PRIMARY KEY,
+  season_id TEXT NOT NULL REFERENCES seasons(id),
+  agent_id TEXT NOT NULL REFERENCES agents(id),
+  games_played INTEGER DEFAULT 0,
+  wins INTEGER DEFAULT 0,
+  losses INTEGER DEFAULT 0,
+  elo_start INTEGER DEFAULT 1500,
+  elo_current INTEGER DEFAULT 1500,
+  elo_peak INTEGER DEFAULT 1500,
+  total_time_ms INTEGER DEFAULT 0,
+  final_rank INTEGER,
+  payout_usdc REAL DEFAULT 0,
+  UNIQUE(season_id, agent_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tournaments_state ON tournaments(state);
+CREATE INDEX IF NOT EXISTS idx_tournament_entries_tournament ON tournament_entries(tournament_id);
+CREATE INDEX IF NOT EXISTS idx_tournament_entries_agent ON tournament_entries(agent_id);
+CREATE INDEX IF NOT EXISTS idx_seasons_state ON seasons(state);
+CREATE INDEX IF NOT EXISTS idx_season_entries_season ON season_entries(season_id);
+CREATE INDEX IF NOT EXISTS idx_season_entries_agent ON season_entries(agent_id);
 `;
 
 // Initialize database schema
@@ -219,7 +295,10 @@ export interface Game {
   player2TimeMs: number | null;
   player1EloChange: number | null;
   player2EloChange: number | null;
-  // Wager fields
+  // Game mode and wager fields
+  gameMode: 'ranked' | 'pot' | 'tournament' | 'casual';
+  tournamentId: string | null;
+  seasonId: string | null;
   wagerAmountUsdc: number;
   isRanked: boolean;
   player1WagerLocked: boolean;
@@ -309,6 +388,70 @@ export interface LeaderboardEntry {
   netProfitUsdc: number;
 }
 
+export interface Tournament {
+  id: string;
+  name: string;
+  description: string | null;
+  difficulty: string;
+  entryFeeUsdc: number;
+  prizePoolUsdc: number;
+  houseContributionUsdc: number;
+  maxParticipants: number;
+  currentParticipants: number;
+  state: 'registration' | 'in_progress' | 'finished' | 'cancelled';
+  prizeDistribution: Record<string, number>; // { "1": 50, "2": 30, "3": 20 }
+  startsAt: string | null;
+  endsAt: string | null;
+  createdAt: string;
+}
+
+export interface TournamentEntry {
+  id: string;
+  tournamentId: string;
+  agentId: string;
+  agentName?: string;
+  seed: number | null;
+  gamesWon: number;
+  gamesLost: number;
+  totalTimeMs: number;
+  placement: number | null;
+  payoutUsdc: number;
+  eliminated: boolean;
+  joinedAt: string;
+}
+
+export interface Season {
+  id: string;
+  name: string;
+  description: string | null;
+  rewardPoolUsdc: number;
+  houseFundedUsdc: number;
+  state: 'upcoming' | 'active' | 'calculating' | 'finished';
+  prizeDistribution: Record<string, number>; // Top 10 percentages
+  minGamesRequired: number;
+  startsAt: string;
+  endsAt: string | null;
+  createdAt: string;
+}
+
+export interface SeasonEntry {
+  id: string;
+  seasonId: string;
+  agentId: string;
+  agentName?: string;
+  gamesPlayed: number;
+  wins: number;
+  losses: number;
+  eloStart: number;
+  eloCurrent: number;
+  eloPeak: number;
+  totalTimeMs: number;
+  finalRank: number | null;
+  payoutUsdc: number;
+}
+
+export type GameMode = 'ranked' | 'pot' | 'tournament' | 'casual';
+
 // ============================================================================
 // Helper Functions
 // ============================================================================
@@ -363,7 +506,10 @@ function mapRowToGame(row: Record<string, unknown>): Game {
     player2TimeMs: row.player2_time_ms as number | null,
     player1EloChange: row.player1_elo_change as number | null,
     player2EloChange: row.player2_elo_change as number | null,
-    // Wager fields
+    // Game mode and wager fields
+    gameMode: (row.game_mode as Game['gameMode']) || 'ranked',
+    tournamentId: row.tournament_id as string | null,
+    seasonId: row.season_id as string | null,
     wagerAmountUsdc: (row.wager_amount_usdc as number) || 0,
     isRanked: (row.is_ranked as number) === 1,
     player1WagerLocked: (row.player1_wager_locked as number) === 1,
@@ -1221,6 +1367,458 @@ export async function cleanupOldGames(maxAgeMinutes: number = 60): Promise<numbe
 }
 
 // ============================================================================
+// Tournament Operations
+// ============================================================================
+
+export async function createTournament(
+  name: string,
+  difficulty: string,
+  entryFeeUsdc: number,
+  houseContributionUsdc: number = 0,
+  maxParticipants: number = 32,
+  prizeDistribution: Record<string, number> = { '1': 50, '2': 30, '3': 20 },
+  startsAt?: string,
+  description?: string
+): Promise<Tournament> {
+  await initDb();
+  const id = generateId();
+
+  await db.execute({
+    sql: `
+      INSERT INTO tournaments (id, name, description, difficulty, entry_fee_usdc, house_contribution_usdc, max_participants, prize_distribution, starts_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+    args: [id, name, description || null, difficulty, entryFeeUsdc, houseContributionUsdc, maxParticipants, JSON.stringify(prizeDistribution), startsAt || null],
+  });
+
+  return getTournament(id) as Promise<Tournament>;
+}
+
+export async function getTournament(id: string): Promise<Tournament | null> {
+  await initDb();
+  const result = await db.execute({
+    sql: 'SELECT * FROM tournaments WHERE id = ?',
+    args: [id],
+  });
+
+  if (result.rows.length === 0) return null;
+  const row = result.rows[0];
+
+  return {
+    id: row.id as string,
+    name: row.name as string,
+    description: row.description as string | null,
+    difficulty: row.difficulty as string,
+    entryFeeUsdc: (row.entry_fee_usdc as number) || 0,
+    prizePoolUsdc: (row.prize_pool_usdc as number) || 0,
+    houseContributionUsdc: (row.house_contribution_usdc as number) || 0,
+    maxParticipants: row.max_participants as number,
+    currentParticipants: row.current_participants as number,
+    state: row.state as Tournament['state'],
+    prizeDistribution: JSON.parse((row.prize_distribution as string) || '{}'),
+    startsAt: row.starts_at as string | null,
+    endsAt: row.ends_at as string | null,
+    createdAt: row.created_at as string,
+  };
+}
+
+export async function getActiveTournaments(): Promise<Tournament[]> {
+  await initDb();
+  const result = await db.execute({
+    sql: `SELECT * FROM tournaments WHERE state IN ('registration', 'in_progress') ORDER BY created_at DESC`,
+    args: [],
+  });
+
+  return result.rows.map(row => ({
+    id: row.id as string,
+    name: row.name as string,
+    description: row.description as string | null,
+    difficulty: row.difficulty as string,
+    entryFeeUsdc: (row.entry_fee_usdc as number) || 0,
+    prizePoolUsdc: (row.prize_pool_usdc as number) || 0,
+    houseContributionUsdc: (row.house_contribution_usdc as number) || 0,
+    maxParticipants: row.max_participants as number,
+    currentParticipants: row.current_participants as number,
+    state: row.state as Tournament['state'],
+    prizeDistribution: JSON.parse((row.prize_distribution as string) || '{}'),
+    startsAt: row.starts_at as string | null,
+    endsAt: row.ends_at as string | null,
+    createdAt: row.created_at as string,
+  }));
+}
+
+export async function joinTournament(tournamentId: string, agentId: string): Promise<{ success: boolean; error?: string; entry?: TournamentEntry }> {
+  await initDb();
+
+  const tournament = await getTournament(tournamentId);
+  if (!tournament) return { success: false, error: 'Tournament not found' };
+  if (tournament.state !== 'registration') return { success: false, error: 'Tournament not accepting registrations' };
+  if (tournament.currentParticipants >= tournament.maxParticipants) return { success: false, error: 'Tournament is full' };
+
+  // Check if already joined
+  const existing = await db.execute({
+    sql: 'SELECT id FROM tournament_entries WHERE tournament_id = ? AND agent_id = ?',
+    args: [tournamentId, agentId],
+  });
+  if (existing.rows.length > 0) return { success: false, error: 'Already registered for this tournament' };
+
+  // Lock entry fee
+  if (tournament.entryFeeUsdc > 0) {
+    const locked = await lockWagerFunds(agentId, `tournament-${tournamentId}`, tournament.entryFeeUsdc);
+    if (!locked) return { success: false, error: 'Insufficient balance for entry fee' };
+  }
+
+  const id = generateId();
+  await db.execute({
+    sql: `INSERT INTO tournament_entries (id, tournament_id, agent_id) VALUES (?, ?, ?)`,
+    args: [id, tournamentId, agentId],
+  });
+
+  // Update tournament counts and prize pool
+  await db.execute({
+    sql: `
+      UPDATE tournaments SET
+        current_participants = current_participants + 1,
+        prize_pool_usdc = prize_pool_usdc + ?
+      WHERE id = ?
+    `,
+    args: [tournament.entryFeeUsdc, tournamentId],
+  });
+
+  const entry = await getTournamentEntry(id);
+  return { success: true, entry: entry || undefined };
+}
+
+export async function getTournamentEntry(id: string): Promise<TournamentEntry | null> {
+  await initDb();
+  const result = await db.execute({
+    sql: `
+      SELECT te.*, a.name as agent_name FROM tournament_entries te
+      JOIN agents a ON te.agent_id = a.id
+      WHERE te.id = ?
+    `,
+    args: [id],
+  });
+
+  if (result.rows.length === 0) return null;
+  const row = result.rows[0];
+
+  return {
+    id: row.id as string,
+    tournamentId: row.tournament_id as string,
+    agentId: row.agent_id as string,
+    agentName: row.agent_name as string,
+    seed: row.seed as number | null,
+    gamesWon: row.games_won as number,
+    gamesLost: row.games_lost as number,
+    totalTimeMs: row.total_time_ms as number,
+    placement: row.placement as number | null,
+    payoutUsdc: (row.payout_usdc as number) || 0,
+    eliminated: !!row.eliminated,
+    joinedAt: row.joined_at as string,
+  };
+}
+
+export async function getTournamentLeaderboard(tournamentId: string): Promise<TournamentEntry[]> {
+  await initDb();
+  const result = await db.execute({
+    sql: `
+      SELECT te.*, a.name as agent_name FROM tournament_entries te
+      JOIN agents a ON te.agent_id = a.id
+      WHERE te.tournament_id = ?
+      ORDER BY te.games_won DESC, te.total_time_ms ASC
+    `,
+    args: [tournamentId],
+  });
+
+  return result.rows.map(row => ({
+    id: row.id as string,
+    tournamentId: row.tournament_id as string,
+    agentId: row.agent_id as string,
+    agentName: row.agent_name as string,
+    seed: row.seed as number | null,
+    gamesWon: row.games_won as number,
+    gamesLost: row.games_lost as number,
+    totalTimeMs: row.total_time_ms as number,
+    placement: row.placement as number | null,
+    payoutUsdc: (row.payout_usdc as number) || 0,
+    eliminated: !!row.eliminated,
+    joinedAt: row.joined_at as string,
+  }));
+}
+
+// ============================================================================
+// Season Operations
+// ============================================================================
+
+export async function createSeason(
+  name: string,
+  rewardPoolUsdc: number,
+  durationDays: number = 7,
+  minGamesRequired: number = 10,
+  prizeDistribution: Record<string, number> = { '1': 30, '2': 20, '3': 15, '4': 10, '5': 8, '6': 6, '7': 5, '8': 3, '9': 2, '10': 1 },
+  description?: string
+): Promise<Season> {
+  await initDb();
+  const id = generateId();
+  const startsAt = new Date().toISOString();
+  const endsAt = new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000).toISOString();
+
+  await db.execute({
+    sql: `
+      INSERT INTO seasons (id, name, description, reward_pool_usdc, house_funded_usdc, min_games_required, prize_distribution, starts_at, ends_at, state)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+    `,
+    args: [id, name, description || null, rewardPoolUsdc, rewardPoolUsdc, minGamesRequired, JSON.stringify(prizeDistribution), startsAt, endsAt],
+  });
+
+  return getSeason(id) as Promise<Season>;
+}
+
+export async function getSeason(id: string): Promise<Season | null> {
+  await initDb();
+  const result = await db.execute({
+    sql: 'SELECT * FROM seasons WHERE id = ?',
+    args: [id],
+  });
+
+  if (result.rows.length === 0) return null;
+  const row = result.rows[0];
+
+  return {
+    id: row.id as string,
+    name: row.name as string,
+    description: row.description as string | null,
+    rewardPoolUsdc: (row.reward_pool_usdc as number) || 0,
+    houseFundedUsdc: (row.house_funded_usdc as number) || 0,
+    state: row.state as Season['state'],
+    prizeDistribution: JSON.parse((row.prize_distribution as string) || '{}'),
+    minGamesRequired: row.min_games_required as number,
+    startsAt: row.starts_at as string,
+    endsAt: row.ends_at as string | null,
+    createdAt: row.created_at as string,
+  };
+}
+
+export async function getActiveSeason(): Promise<Season | null> {
+  await initDb();
+  const result = await db.execute({
+    sql: `SELECT * FROM seasons WHERE state = 'active' ORDER BY starts_at DESC LIMIT 1`,
+    args: [],
+  });
+
+  if (result.rows.length === 0) return null;
+  const row = result.rows[0];
+
+  return {
+    id: row.id as string,
+    name: row.name as string,
+    description: row.description as string | null,
+    rewardPoolUsdc: (row.reward_pool_usdc as number) || 0,
+    houseFundedUsdc: (row.house_funded_usdc as number) || 0,
+    state: row.state as Season['state'],
+    prizeDistribution: JSON.parse((row.prize_distribution as string) || '{}'),
+    minGamesRequired: row.min_games_required as number,
+    startsAt: row.starts_at as string,
+    endsAt: row.ends_at as string | null,
+    createdAt: row.created_at as string,
+  };
+}
+
+export async function getOrCreateSeasonEntry(seasonId: string, agentId: string): Promise<SeasonEntry> {
+  await initDb();
+
+  // Check if entry exists
+  const existing = await db.execute({
+    sql: `
+      SELECT se.*, a.name as agent_name FROM season_entries se
+      JOIN agents a ON se.agent_id = a.id
+      WHERE se.season_id = ? AND se.agent_id = ?
+    `,
+    args: [seasonId, agentId],
+  });
+
+  if (existing.rows.length > 0) {
+    const row = existing.rows[0];
+    return {
+      id: row.id as string,
+      seasonId: row.season_id as string,
+      agentId: row.agent_id as string,
+      agentName: row.agent_name as string,
+      gamesPlayed: row.games_played as number,
+      wins: row.wins as number,
+      losses: row.losses as number,
+      eloStart: row.elo_start as number,
+      eloCurrent: row.elo_current as number,
+      eloPeak: row.elo_peak as number,
+      totalTimeMs: row.total_time_ms as number,
+      finalRank: row.final_rank as number | null,
+      payoutUsdc: (row.payout_usdc as number) || 0,
+    };
+  }
+
+  // Get agent's current ELO
+  const agent = await getAgentById(agentId);
+  const currentElo = agent?.eloRating || 1500;
+
+  const id = generateId();
+  await db.execute({
+    sql: `INSERT INTO season_entries (id, season_id, agent_id, elo_start, elo_current, elo_peak) VALUES (?, ?, ?, ?, ?, ?)`,
+    args: [id, seasonId, agentId, currentElo, currentElo, currentElo],
+  });
+
+  return {
+    id,
+    seasonId,
+    agentId,
+    gamesPlayed: 0,
+    wins: 0,
+    losses: 0,
+    eloStart: currentElo,
+    eloCurrent: currentElo,
+    eloPeak: currentElo,
+    totalTimeMs: 0,
+    finalRank: null,
+    payoutUsdc: 0,
+  };
+}
+
+export async function updateSeasonEntry(
+  seasonId: string,
+  agentId: string,
+  won: boolean,
+  timeMs: number,
+  newElo: number
+): Promise<void> {
+  await initDb();
+
+  // Ensure entry exists
+  await getOrCreateSeasonEntry(seasonId, agentId);
+
+  await db.execute({
+    sql: `
+      UPDATE season_entries SET
+        games_played = games_played + 1,
+        wins = wins + ?,
+        losses = losses + ?,
+        total_time_ms = total_time_ms + ?,
+        elo_current = ?,
+        elo_peak = MAX(elo_peak, ?)
+      WHERE season_id = ? AND agent_id = ?
+    `,
+    args: [won ? 1 : 0, won ? 0 : 1, timeMs, newElo, newElo, seasonId, agentId],
+  });
+}
+
+export async function getSeasonLeaderboard(seasonId: string): Promise<SeasonEntry[]> {
+  await initDb();
+  const result = await db.execute({
+    sql: `
+      SELECT se.*, a.name as agent_name FROM season_entries se
+      JOIN agents a ON se.agent_id = a.id
+      WHERE se.season_id = ?
+      ORDER BY se.elo_current DESC, se.wins DESC
+    `,
+    args: [seasonId],
+  });
+
+  return result.rows.map((row, idx) => ({
+    id: row.id as string,
+    seasonId: row.season_id as string,
+    agentId: row.agent_id as string,
+    agentName: row.agent_name as string,
+    gamesPlayed: row.games_played as number,
+    wins: row.wins as number,
+    losses: row.losses as number,
+    eloStart: row.elo_start as number,
+    eloCurrent: row.elo_current as number,
+    eloPeak: row.elo_peak as number,
+    totalTimeMs: row.total_time_ms as number,
+    finalRank: (row.final_rank as number | null) || (idx + 1),
+    payoutUsdc: (row.payout_usdc as number) || 0,
+  }));
+}
+
+export async function endSeasonAndDistributeRewards(seasonId: string): Promise<{ distributed: number; entries: SeasonEntry[] }> {
+  await initDb();
+
+  const season = await getSeason(seasonId);
+  if (!season) throw new Error('Season not found');
+  if (season.state !== 'active') throw new Error('Season is not active');
+
+  // Mark as calculating
+  await db.execute({
+    sql: `UPDATE seasons SET state = 'calculating' WHERE id = ?`,
+    args: [seasonId],
+  });
+
+  // Get qualified entries (met min games)
+  const qualified = await db.execute({
+    sql: `
+      SELECT se.*, a.name as agent_name FROM season_entries se
+      JOIN agents a ON se.agent_id = a.id
+      WHERE se.season_id = ? AND se.games_played >= ?
+      ORDER BY se.elo_current DESC, se.wins DESC
+    `,
+    args: [seasonId, season.minGamesRequired],
+  });
+
+  let totalDistributed = 0;
+  const entries: SeasonEntry[] = [];
+
+  for (let i = 0; i < qualified.rows.length; i++) {
+    const row = qualified.rows[i];
+    const rank = i + 1;
+    const prizePercent = season.prizeDistribution[rank.toString()] || 0;
+    const payout = (season.rewardPoolUsdc * prizePercent) / 100;
+
+    if (payout > 0) {
+      // Credit the winner's wallet
+      await db.execute({
+        sql: `
+          UPDATE wallets SET
+            balance_usdc = balance_usdc + ?,
+            total_won_usdc = total_won_usdc + ?
+          WHERE agent_id = ?
+        `,
+        args: [payout, payout, row.agent_id],
+      });
+      totalDistributed += payout;
+    }
+
+    // Update entry with final rank and payout
+    await db.execute({
+      sql: `UPDATE season_entries SET final_rank = ?, payout_usdc = ? WHERE id = ?`,
+      args: [rank, payout, row.id],
+    });
+
+    entries.push({
+      id: row.id as string,
+      seasonId: row.season_id as string,
+      agentId: row.agent_id as string,
+      agentName: row.agent_name as string,
+      gamesPlayed: row.games_played as number,
+      wins: row.wins as number,
+      losses: row.losses as number,
+      eloStart: row.elo_start as number,
+      eloCurrent: row.elo_current as number,
+      eloPeak: row.elo_peak as number,
+      totalTimeMs: row.total_time_ms as number,
+      finalRank: rank,
+      payoutUsdc: payout,
+    });
+  }
+
+  // Mark as finished
+  await db.execute({
+    sql: `UPDATE seasons SET state = 'finished', ends_at = datetime('now') WHERE id = ?`,
+    args: [seasonId],
+  });
+
+  return { distributed: totalDistributed, entries };
+}
+
+// ============================================================================
 // Constants
 // ============================================================================
 
@@ -1229,6 +1827,13 @@ export const WAGER_CONFIG = {
   maxWagerUsdc: 1000,
   houseRakePercent: HOUSE_RAKE_PERCENT,
 };
+
+export const GAME_MODES = {
+  ranked: { name: 'Ranked', description: 'Free competitive play, affects ELO' },
+  pot: { name: 'Pot', description: 'Winner takes all, USDC wager required' },
+  tournament: { name: 'Tournament', description: 'Entry fee, compete for prize pool' },
+  casual: { name: 'Casual', description: 'Practice mode, no ELO changes' },
+} as const;
 
 // Export the database client for direct queries if needed
 export { db };
