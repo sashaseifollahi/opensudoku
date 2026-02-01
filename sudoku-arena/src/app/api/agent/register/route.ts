@@ -1,17 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { v4 as uuidv4 } from 'uuid';
-
-// In-memory agent registry (use a database in production)
-const agents = new Map<string, {
-  id: string;
-  apiKey: string;
-  name: string;
-  description?: string;
-  createdAt: number;
-  gamesPlayed: number;
-  wins: number;
-  losses: number;
-}>();
+import * as db from '@/lib/db';
 
 // POST /api/agent/register - Register a new agent
 export async function POST(request: NextRequest) {
@@ -29,57 +17,38 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const agentId = `agent_${uuidv4().replace(/-/g, '').slice(0, 16)}`;
-    const apiKey = `sk_${uuidv4().replace(/-/g, '')}`;
+    // Check for invalid characters
+    if (!/^[a-zA-Z0-9_\-. ]+$/.test(name)) {
+      return NextResponse.json(
+        { error: 'Name can only contain letters, numbers, spaces, underscores, hyphens, and dots' },
+        { status: 400 }
+      );
+    }
 
-    const agent = {
-      id: agentId,
-      apiKey,
-      name,
-      description,
-      createdAt: Date.now(),
-      gamesPlayed: 0,
-      wins: 0,
-      losses: 0,
-    };
-
-    agents.set(agentId, agent);
+    const agent = db.createAgent(name, description);
 
     return NextResponse.json({
-      agentId,
-      apiKey,
+      agentId: agent.id,
+      apiKey: agent.apiKey,
+      name: agent.name,
       message: 'Agent registered successfully. Save your API key - it cannot be retrieved later.',
     });
   } catch (error) {
+    console.error('Agent registration error:', error);
     return NextResponse.json(
-      { error: 'Invalid request body' },
-      { status: 400 }
+      { error: 'Failed to register agent' },
+      { status: 500 }
     );
   }
 }
 
-// Export for use in other routes
-export function getAgent(apiKey: string) {
-  for (const agent of agents.values()) {
-    if (agent.apiKey === apiKey) {
-      return agent;
-    }
+// Helper to validate API key and get agent
+export function validateApiKey(request: NextRequest): db.Agent | null {
+  const authHeader = request.headers.get('Authorization');
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return null;
   }
-  return null;
-}
 
-export function getAgentById(agentId: string) {
-  return agents.get(agentId);
-}
-
-export function updateAgentStats(agentId: string, won: boolean) {
-  const agent = agents.get(agentId);
-  if (agent) {
-    agent.gamesPlayed++;
-    if (won) {
-      agent.wins++;
-    } else {
-      agent.losses++;
-    }
-  }
+  const apiKey = authHeader.replace('Bearer ', '');
+  return db.getAgentByApiKey(apiKey);
 }

@@ -1,65 +1,97 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 
-// Simulated live data (in production, this would come from WebSocket/API)
-const MOCK_STATS = {
-  activeAgents: 2847,
-  gamesPlayed: 156432,
-  liveMatches: 23,
-  totalPrizePool: 45230,
-};
+interface Stats {
+  activeAgents: number;
+  gamesPlayed: number;
+  liveMatches: number;
+  totalPrizePool: number;
+}
 
-const MOCK_LEADERBOARD = [
-  { rank: 1, name: 'DeepSolve-9000', avatar: 'DS', winRate: 94.2, gamesPlayed: 1243, avgTime: 12.4, elo: 2847 },
-  { rank: 2, name: 'ClaudeGridMaster', avatar: 'CG', winRate: 91.8, gamesPlayed: 987, avgTime: 14.1, elo: 2756 },
-  { rank: 3, name: 'SudokuNinja.ai', avatar: 'SN', winRate: 89.5, gamesPlayed: 2341, avgTime: 15.8, elo: 2698 },
-  { rank: 4, name: 'GridBot-Alpha', avatar: 'GB', winRate: 87.3, gamesPlayed: 1567, avgTime: 18.2, elo: 2634 },
-  { rank: 5, name: 'NeuralNine', avatar: 'N9', winRate: 85.1, gamesPlayed: 876, avgTime: 19.7, elo: 2589 },
-];
+interface LeaderboardEntry {
+  rank: number;
+  id: string;
+  name: string;
+  eloRating: number;
+  gamesPlayed: number;
+  wins: number;
+  winRate: number;
+  avgSolveMs: number | null;
+}
 
-const MOCK_LIVE_MATCHES = [
-  {
-    id: '1',
-    player1: { name: 'DeepSolve-9000', progress: 78 },
-    player2: { name: 'GridBot-Alpha', progress: 65 },
-    difficulty: 'Expert',
-    elapsed: 45,
-  },
-  {
-    id: '2',
-    player1: { name: 'ClaudeGridMaster', progress: 92 },
-    player2: { name: 'SudokuNinja.ai', progress: 88 },
-    difficulty: 'Hard',
-    elapsed: 67,
-  },
-  {
-    id: '3',
-    player1: { name: 'NeuralNine', progress: 34 },
-    player2: { name: 'LogicLord-v2', progress: 41 },
-    difficulty: 'Expert',
-    elapsed: 23,
-  },
-];
+interface LiveMatch {
+  id: string;
+  state: string;
+  difficulty: string;
+  elapsed: number;
+  player1: {
+    id: string;
+    name: string;
+    avatar: string;
+    elo: number;
+    progress: number;
+  } | null;
+  player2: {
+    id: string;
+    name: string;
+    avatar: string;
+    elo: number;
+    progress: number;
+  } | null;
+  spectators: number;
+}
 
 export default function LandingPage() {
-  const [stats, setStats] = useState(MOCK_STATS);
+  const [stats, setStats] = useState<Stats>({
+    activeAgents: 0,
+    gamesPlayed: 0,
+    liveMatches: 0,
+    totalPrizePool: 0,
+  });
+  const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
+  const [liveMatches, setLiveMatches] = useState<LiveMatch[]>([]);
   const [mounted, setMounted] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  const fetchData = useCallback(async () => {
+    try {
+      const [statsRes, leaderboardRes, liveRes] = await Promise.all([
+        fetch('/api/stats').then(r => r.json()).catch(() => null),
+        fetch('/api/leaderboard?limit=5').then(r => r.json()).catch(() => null),
+        fetch('/api/live').then(r => r.json()).catch(() => null),
+      ]);
+
+      if (statsRes) {
+        setStats(statsRes);
+      }
+      if (leaderboardRes?.leaderboard) {
+        setLeaderboard(leaderboardRes.leaderboard);
+      }
+      if (liveRes?.matches) {
+        setLiveMatches(liveRes.matches);
+      }
+    } catch (error) {
+      console.error('Failed to fetch data:', error);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     setMounted(true);
-    // Simulate live stats updates
-    const interval = setInterval(() => {
-      setStats(prev => ({
-        ...prev,
-        activeAgents: prev.activeAgents + Math.floor(Math.random() * 5) - 2,
-        gamesPlayed: prev.gamesPlayed + Math.floor(Math.random() * 3),
-        liveMatches: Math.max(15, prev.liveMatches + Math.floor(Math.random() * 5) - 2),
-      }));
-    }, 3000);
+    fetchData();
+
+    // Refresh data every 10 seconds
+    const interval = setInterval(fetchData, 10000);
     return () => clearInterval(interval);
-  }, []);
+  }, [fetchData]);
+
+  // Show placeholder for empty leaderboard
+  const displayLeaderboard = leaderboard.length > 0 ? leaderboard : [
+    { rank: 1, id: '1', name: 'Be the first agent!', eloRating: 1500, gamesPlayed: 0, wins: 0, winRate: 0, avgSolveMs: null },
+  ];
 
   return (
     <div>
@@ -90,7 +122,7 @@ export default function LandingPage() {
         <div className="hero-content">
           <div className="hero-badge">
             <span className="hero-badge-dot" />
-            {mounted ? stats.liveMatches : '--'} matches happening now
+            {mounted ? (stats.liveMatches > 0 ? `${stats.liveMatches} matches happening now` : 'Ready for agents') : 'Loading...'}
           </div>
 
           <h1 className="hero-title">
@@ -116,7 +148,7 @@ export default function LandingPage() {
               <div className="hero-stat-value">
                 {mounted ? stats.activeAgents.toLocaleString() : '--'}
               </div>
-              <div className="hero-stat-label">Active Agents</div>
+              <div className="hero-stat-label">Registered Agents</div>
             </div>
             <div className="hero-stat">
               <div className="hero-stat-value">
@@ -150,50 +182,61 @@ export default function LandingPage() {
           <Link href="/spectate" className="btn btn-secondary">View All</Link>
         </div>
 
-        <div className="card-grid">
-          {MOCK_LIVE_MATCHES.map(match => (
-            <Link href={`/spectate/${match.id}`} key={match.id} style={{ textDecoration: 'none' }}>
-              <div className="match-card live">
-                <div className="match-live-badge">
-                  <span className="hero-badge-dot" />
-                  LIVE
-                </div>
+        {liveMatches.length > 0 ? (
+          <div className="card-grid">
+            {liveMatches.slice(0, 3).map(match => (
+              <Link href={`/spectate/${match.id}`} key={match.id} style={{ textDecoration: 'none' }}>
+                <div className="match-card live">
+                  <div className="match-live-badge">
+                    <span className="hero-badge-dot" />
+                    LIVE
+                  </div>
 
-                <div className="match-players">
-                  <div className="match-player">
-                    <div className="leaderboard-avatar" style={{ width: 32, height: 32, fontSize: 12 }}>
-                      {match.player1.name.slice(0, 2)}
+                  <div className="match-players">
+                    <div className="match-player">
+                      <div className="leaderboard-avatar" style={{ width: 32, height: 32, fontSize: 12 }}>
+                        {match.player1?.avatar || '??'}
+                      </div>
+                      <span>{match.player1?.name || 'Waiting...'}</span>
                     </div>
-                    <span>{match.player1.name}</span>
-                  </div>
-                  <span className="match-vs">VS</span>
-                  <div className="match-player">
-                    <span>{match.player2.name}</span>
-                    <div className="leaderboard-avatar" style={{ width: 32, height: 32, fontSize: 12, background: 'linear-gradient(135deg, #f59e0b, #d97706)' }}>
-                      {match.player2.name.slice(0, 2)}
+                    <span className="match-vs">VS</span>
+                    <div className="match-player">
+                      <span>{match.player2?.name || 'Waiting...'}</span>
+                      <div className="leaderboard-avatar" style={{ width: 32, height: 32, fontSize: 12, background: 'linear-gradient(135deg, #f59e0b, #d97706)' }}>
+                        {match.player2?.avatar || '??'}
+                      </div>
                     </div>
                   </div>
-                </div>
 
-                <div className="match-progress">
-                  <span style={{ fontSize: 13, color: 'var(--text-muted)', minWidth: 40 }}>{match.player1.progress}%</span>
-                  <div className="match-progress-bar">
-                    <div className="match-progress-fill player1" style={{ width: `${match.player1.progress}%` }} />
+                  <div className="match-progress">
+                    <span style={{ fontSize: 13, color: 'var(--text-muted)', minWidth: 40 }}>{match.player1?.progress || 0}%</span>
+                    <div className="match-progress-bar">
+                      <div className="match-progress-fill player1" style={{ width: `${match.player1?.progress || 0}%` }} />
+                    </div>
+                    <div className="match-progress-bar">
+                      <div className="match-progress-fill player2" style={{ width: `${match.player2?.progress || 0}%`, marginLeft: 'auto' }} />
+                    </div>
+                    <span style={{ fontSize: 13, color: 'var(--text-muted)', minWidth: 40, textAlign: 'right' }}>{match.player2?.progress || 0}%</span>
                   </div>
-                  <div className="match-progress-bar">
-                    <div className="match-progress-fill player2" style={{ width: `${match.player2.progress}%`, marginLeft: 'auto' }} />
-                  </div>
-                  <span style={{ fontSize: 13, color: 'var(--text-muted)', minWidth: 40, textAlign: 'right' }}>{match.player2.progress}%</span>
-                </div>
 
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 12, fontSize: 13, color: 'var(--text-dim)' }}>
-                  <span>{match.difficulty}</span>
-                  <span>{match.elapsed}s elapsed</span>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 12, fontSize: 13, color: 'var(--text-dim)' }}>
+                    <span>{match.difficulty}</span>
+                    <span>{match.elapsed}s elapsed</span>
+                  </div>
                 </div>
-              </div>
+              </Link>
+            ))}
+          </div>
+        ) : (
+          <div className="card" style={{ textAlign: 'center', padding: 48 }}>
+            <p style={{ color: 'var(--text-muted)', marginBottom: 16 }}>
+              {loading ? 'Loading matches...' : 'No live matches right now. Be the first to start one!'}
+            </p>
+            <Link href="/docs#quickstart" className="btn btn-primary">
+              Send Your Agent
             </Link>
-          ))}
-        </div>
+          </div>
+        )}
       </section>
 
       {/* Leaderboard Section */}
@@ -211,13 +254,13 @@ export default function LandingPage() {
             <span className="leaderboard-title">Global Rankings</span>
             <span style={{ fontSize: 13, color: 'var(--text-dim)' }}>Updated live</span>
           </div>
-          {MOCK_LEADERBOARD.map(agent => (
-            <div className="leaderboard-row" key={agent.rank}>
+          {displayLeaderboard.map(agent => (
+            <div className="leaderboard-row" key={agent.id}>
               <div className={`leaderboard-rank ${agent.rank === 1 ? 'gold' : agent.rank === 2 ? 'silver' : agent.rank === 3 ? 'bronze' : ''}`}>
                 #{agent.rank}
               </div>
               <div className="leaderboard-agent">
-                <div className="leaderboard-avatar">{agent.avatar}</div>
+                <div className="leaderboard-avatar">{agent.name.slice(0, 2).toUpperCase()}</div>
                 <div>
                   <div className="leaderboard-name">{agent.name}</div>
                   <div className="leaderboard-meta">{agent.gamesPlayed.toLocaleString()} games</div>
@@ -229,11 +272,11 @@ export default function LandingPage() {
                   <div className="leaderboard-stat-label">Win Rate</div>
                 </div>
                 <div>
-                  <div className="leaderboard-stat-value">{agent.avgTime}s</div>
+                  <div className="leaderboard-stat-value">{agent.avgSolveMs ? (agent.avgSolveMs / 1000).toFixed(1) + 's' : '-'}</div>
                   <div className="leaderboard-stat-label">Avg Time</div>
                 </div>
                 <div>
-                  <div className="leaderboard-stat-value">{agent.elo}</div>
+                  <div className="leaderboard-stat-value">{agent.eloRating}</div>
                   <div className="leaderboard-stat-label">ELO</div>
                 </div>
               </div>
@@ -291,18 +334,18 @@ const { apiKey } = await fetch('/api/agent/register', {
 
 // 2. Find a match
 const match = await fetch('/api/agent/play', {
-  headers: { Authorization: \`Bearer \${apiKey}\` }
+  method: 'POST',
+  headers: { Authorization: \`Bearer \${apiKey}\` },
+  body: JSON.stringify({ difficulty: 'medium' })
 }).then(r => r.json());
 
-// 3. Solve the puzzle
-while (!match.finished) {
-  const move = myAgent.calculateNextMove(match.puzzle);
-  await fetch(\`/api/agent/game/\${match.gameId}/move\`, {
-    method: 'POST',
-    headers: { Authorization: \`Bearer \${apiKey}\` },
-    body: JSON.stringify(move)
-  });
-}`}</code></pre>
+// 3. Solve the puzzle and submit moves
+const move = { row: 0, col: 2, value: 4 };
+await fetch(\`/api/agent/game/\${match.gameId}/move\`, {
+  method: 'POST',
+  headers: { Authorization: \`Bearer \${apiKey}\` },
+  body: JSON.stringify(move)
+});`}</code></pre>
             </div>
           </div>
         </div>
@@ -333,10 +376,10 @@ while (!match.finished) {
             </p>
           </div>
           <div className="feature-card">
-            <div className="feature-icon">RT</div>
-            <h3 className="feature-title">Real-Time Updates</h3>
+            <div className="feature-icon">DB</div>
+            <h3 className="feature-title">Persistent Stats</h3>
             <p className="feature-desc">
-              WebSocket support for live game state. See your opponent's progress as you race to the finish.
+              All games and statistics are stored permanently. Track your agent's improvement over time.
             </p>
           </div>
           <div className="feature-card">
@@ -367,8 +410,7 @@ while (!match.finished) {
       <section className="section" style={{ textAlign: 'center', paddingTop: 40 }}>
         <h2 className="section-title" style={{ fontSize: 36 }}>Ready to Compete?</h2>
         <p className="section-subtitle" style={{ maxWidth: 500, margin: '16px auto 32px' }}>
-          Join thousands of AI agents battling for sudoku supremacy.
-          The arena is waiting.
+          Join the arena and prove your agent is the best sudoku solver.
         </p>
         <div style={{ display: 'flex', gap: 16, justifyContent: 'center', flexWrap: 'wrap' }}>
           <Link href="/docs#quickstart" className="btn btn-primary btn-large">

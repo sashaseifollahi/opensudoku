@@ -1,30 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { gameManager } from '@/lib/server/GameManager';
-import { getAgent } from '../../register/route';
+import * as db from '@/lib/db';
+import { validateApiKey } from '../../register/route';
 
 // GET /api/agent/game/[gameId] - Get game state for agent
 export async function GET(
   request: NextRequest,
   { params }: { params: { gameId: string } }
 ) {
-  const apiKey = request.headers.get('Authorization')?.replace('Bearer ', '');
+  const agent = validateApiKey(request);
 
-  if (!apiKey) {
-    return NextResponse.json(
-      { error: 'Missing API key' },
-      { status: 401 }
-    );
-  }
-
-  const agent = getAgent(apiKey);
   if (!agent) {
     return NextResponse.json(
-      { error: 'Invalid API key' },
+      { error: 'Invalid or missing API key' },
       { status: 401 }
     );
   }
 
-  const game = gameManager.getGame(params.gameId);
+  const game = db.getGameById(params.gameId);
   if (!game) {
     return NextResponse.json(
       { error: 'Game not found' },
@@ -33,24 +25,62 @@ export async function GET(
   }
 
   // Check if agent is in this game
-  const playerState = game.getPlayerState(agent.id);
-  if (!playerState) {
+  const isPlayer1 = game.player1Id === agent.id;
+  const isPlayer2 = game.player2Id === agent.id;
+
+  if (!isPlayer1 && !isPlayer2) {
     return NextResponse.json(
       { error: 'You are not a player in this game' },
       { status: 403 }
     );
   }
 
-  const gameJson = game.toJSON();
+  // Get opponent info
+  const opponentId = isPlayer1 ? game.player2Id : game.player1Id;
+  const opponent = opponentId ? db.getAgentById(opponentId) : null;
+
+  // Calculate progress percentage
+  const yourProgress = isPlayer1 ? game.player1Progress : game.player2Progress;
+  const opponentProgress = isPlayer1 ? game.player2Progress : game.player1Progress;
+  const yourMistakes = isPlayer1 ? game.player1Mistakes : game.player2Mistakes;
+  const yourBoard = isPlayer1 ? game.player1Board : game.player2Board;
+
+  // Only show solution when game is finished
+  const showSolution = game.state === 'finished';
+
+  // Calculate result if game is finished
+  let result = null;
+  if (game.state === 'finished') {
+    const won = game.winnerId === agent.id;
+    const eloChange = isPlayer1 ? game.player1EloChange : game.player2EloChange;
+    const timeMs = isPlayer1 ? game.player1TimeMs : game.player2TimeMs;
+
+    result = {
+      finished: true,
+      won,
+      winnerId: game.winnerId,
+      timeMs,
+      eloChange,
+    };
+  }
 
   return NextResponse.json({
-    gameId: game.getId(),
-    state: game.getState(),
-    puzzle: gameJson.puzzle,
-    solution: game.getState() === 'finished' ? game.getSolution() : undefined,
-    yourProgress: playerState.progress,
-    yourMistakes: playerState.mistakes,
-    players: gameJson.players,
-    result: game.getResult(),
+    gameId: game.id,
+    state: game.state,
+    difficulty: game.difficulty,
+    puzzle: game.puzzle,
+    solution: showSolution ? game.solution : undefined,
+    currentBoard: yourBoard,
+    yourProgress: Math.round((yourProgress / 81) * 100),
+    yourMistakes,
+    opponentProgress: Math.round((opponentProgress / 81) * 100),
+    opponent: opponent ? {
+      id: opponent.id,
+      name: opponent.name,
+      elo: opponent.eloRating,
+    } : null,
+    result,
+    startedAt: game.startedAt,
+    finishedAt: game.finishedAt,
   });
 }

@@ -1,0 +1,156 @@
+// Prisma schema for Sudoku Arena
+// Using SQLite for development, can switch to PostgreSQL for production
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// AI Agent that competes in the arena
+model Agent {
+  id          String   @id @default(cuid())
+  apiKey      String   @unique
+  name        String
+  description String?
+
+  // Statistics
+  gamesPlayed Int      @default(0)
+  wins        Int      @default(0)
+  losses      Int      @default(0)
+  draws       Int      @default(0)
+  eloRating   Int      @default(1500)
+  peakElo     Int      @default(1500)
+
+  // Performance metrics
+  totalSolveTimeMs BigInt   @default(0)
+  fastestSolveMs   Int?
+  totalMoves       Int      @default(0)
+  totalMistakes    Int      @default(0)
+
+  // Timestamps
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  lastActiveAt DateTime?
+
+  // Relations
+  gamesAsPlayer1 Game[]     @relation("Player1")
+  gamesAsPlayer2 Game[]     @relation("Player2")
+  gamesWon       Game[]     @relation("Winner")
+  moves          Move[]
+
+  @@index([eloRating])
+  @@index([apiKey])
+}
+
+// A sudoku game between two agents
+model Game {
+  id          String    @id @default(cuid())
+
+  // Game configuration
+  difficulty  String    // easy, medium, hard, expert
+  puzzle      String    // 81-char string of initial puzzle
+  solution    String    // 81-char string of solution
+
+  // Players
+  player1Id   String?
+  player1     Agent?    @relation("Player1", fields: [player1Id], references: [id])
+  player2Id   String?
+  player2     Agent?    @relation("Player2", fields: [player2Id], references: [id])
+
+  // Game state
+  state       String    @default("waiting") // waiting, countdown, playing, finished
+
+  // Player progress (0-81 cells filled correctly)
+  player1Progress Int   @default(0)
+  player2Progress Int   @default(0)
+  player1Mistakes Int   @default(0)
+  player2Mistakes Int   @default(0)
+  player1Board    String? // Current board state for player 1
+  player2Board    String? // Current board state for player 2
+
+  // Result
+  winnerId    String?
+  winner      Agent?    @relation("Winner", fields: [winnerId], references: [id])
+  player1TimeMs Int?
+  player2TimeMs Int?
+  player1EloChange Int?
+  player2EloChange Int?
+
+  // Timestamps
+  createdAt   DateTime  @default(now())
+  startedAt   DateTime?
+  finishedAt  DateTime?
+
+  // Relations
+  moves       Move[]
+
+  @@index([state])
+  @@index([createdAt])
+  @@index([player1Id])
+  @@index([player2Id])
+}
+
+// Individual move in a game
+model Move {
+  id        String   @id @default(cuid())
+
+  gameId    String
+  game      Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  agentId   String
+  agent     Agent    @relation(fields: [agentId], references: [id])
+
+  // Move details
+  row       Int      // 0-8
+  col       Int      // 0-8
+  value     Int      // 1-9 (0 for clear)
+
+  // Validation
+  isValid   Boolean  // Was this move correct?
+
+  // Timing
+  timestamp DateTime @default(now())
+
+  @@index([gameId])
+  @@index([agentId])
+}
+
+// Leaderboard cache for fast queries
+model LeaderboardEntry {
+  id          String   @id @default(cuid())
+
+  agentId     String   @unique
+  agentName   String
+
+  // Cached stats
+  eloRating   Int
+  gamesPlayed Int
+  wins        Int
+  winRate     Float
+  avgSolveMs  Int?
+
+  // Ranking
+  globalRank  Int?
+
+  // Last updated
+  updatedAt   DateTime @updatedAt
+
+  @@index([eloRating])
+  @@index([globalRank])
+}
+
+// Platform statistics
+model PlatformStats {
+  id              String   @id @default("global")
+
+  totalAgents     Int      @default(0)
+  totalGames      Int      @default(0)
+  activeGames     Int      @default(0)
+  gamesLast24h    Int      @default(0)
+
+  updatedAt       DateTime @updatedAt
+}
