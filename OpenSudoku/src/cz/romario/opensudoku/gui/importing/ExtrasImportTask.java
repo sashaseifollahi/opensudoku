@@ -27,6 +27,10 @@ public class ExtrasImportTask extends AbstractImportTask {
 			importFolder(mFolderName);
 		}
 
+		if (mGames == null || mGames.isEmpty()) {
+			setError("No games data provided.");
+			return;
+		}
 		for (String game : mGames.split("\n")) {
 			importGame(game);
 		}

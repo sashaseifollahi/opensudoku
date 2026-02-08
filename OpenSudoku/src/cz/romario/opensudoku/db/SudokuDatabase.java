@@ -165,7 +165,7 @@ public class SudokuDatabase {
 	 */
 	public FolderInfo getInboxFolder() {
 		FolderInfo inbox = findFolder(INBOX_FOLDER_NAME);
-		if (inbox != null) {
+		if (inbox == null) {
 			inbox = insertFolder(INBOX_FOLDER_NAME, System.currentTimeMillis());
 		}
 		return inbox;

@@ -134,7 +134,7 @@ public class SudokuExportActivity extends Activity {
 	private void exportToFile() {
 		File sdcard = new File("/sdcard");
 		if (!sdcard.exists()) {
-			Toast.makeText(SudokuExportActivity.this, R.string.sdcard_not_found, Toast.LENGTH_LONG);
+			Toast.makeText(SudokuExportActivity.this, R.string.sdcard_not_found, Toast.LENGTH_LONG).show();
 			finish();
 		}
 

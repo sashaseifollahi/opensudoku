@@ -138,7 +138,12 @@ public class OpenSudokuImportTask extends AbstractImportTask {
 	}
 
 	private long parseLong(String string, long defaultValue) {
-		return string != null ? Long.parseLong(string) : defaultValue;
+		if (string == null) return defaultValue;
+		try {
+			return Long.parseLong(string);
+		} catch (NumberFormatException e) {
+			return defaultValue;
+		}
 	}
 
 	private void importV1(XmlPullParser parser)

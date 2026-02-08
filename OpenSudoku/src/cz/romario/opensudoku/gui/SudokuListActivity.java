@@ -327,8 +327,7 @@ public class SudokuListActivity extends ListActivity {
 
 		switch (id) {
 			case DIALOG_EDIT_NOTE: {
-				SudokuDatabase db = new SudokuDatabase(getApplicationContext());
-				SudokuGame game = db.getSudoku(mEditNotePuzzleID);
+				SudokuGame game = mDatabase.getSudoku(mEditNotePuzzleID);
 				mEditNoteInput.setText(game.getNote());
 				break;
 			}
@@ -574,7 +573,7 @@ public class SudokuListActivity extends ListActivity {
 				case R.id.note:
 					String note = c.getString(columnIndex);
 					label = ((TextView) view);
-					if (note == null || note.trim() == "") {
+					if (note == null || note.trim().equals("")) {
 						((TextView) view).setVisibility(View.GONE);
 					} else {
 						((TextView) view).setText(note);
